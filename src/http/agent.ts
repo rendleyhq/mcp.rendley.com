@@ -234,6 +234,7 @@ export async function handleStartAgentJob(
       kind: "agent",
       project_id: projectId,
       owner_key_id: deps.apiKeyId,
+      thread_id: resolvedThreadId,
     });
 
     log.info("rest_agent_job_started", {

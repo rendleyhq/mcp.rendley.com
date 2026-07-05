@@ -4,9 +4,9 @@ import type { CreateJobInput, Job, JobStore } from "@/types/jobs.types";
 import { JobStatus } from "@/types/jobs.types";
 
 export const JOB_TTL_MS = 60 * 60 * 1000;
-const ORPHAN_MAX_AGE_MS = config.agentTimeoutMs + 600_000;
+export const ORPHAN_MAX_AGE_MS = config.agentTimeoutMs + 600_000;
 
-const isTerminal = (s: JobStatus) =>
+export const isTerminal = (s: JobStatus) =>
   s === JobStatus.Completed || s === JobStatus.Failed;
 
 export function createMemoryJobStore(): JobStore {
@@ -23,9 +23,14 @@ export function createMemoryJobStore(): JobStore {
         status: JobStatus.Pending,
         created_at: now,
         updated_at: now,
+        ...(input.thread_id ? { thread_id: input.thread_id } : {}),
       };
       jobs.set(job.job_id, job);
       return job;
+    },
+
+    async insert(job: Job): Promise<void> {
+      jobs.set(job.job_id, job);
     },
 
     async get(id: string): Promise<Job | null> {

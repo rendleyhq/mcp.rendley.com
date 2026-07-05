@@ -10,6 +10,8 @@ export interface BridgeMessage {
   error?: string;
 }
 
+export type BridgeRunStatus = "idle" | "running" | "completed" | "error" | "cancelled";
+
 export interface BridgeStatus {
   isStreaming: boolean;
   hasInterrupt: boolean;
@@ -19,6 +21,10 @@ export interface BridgeStatus {
   isSyncing: boolean;
   commandExecutions: number;
   lastError?: string | null;
+  // Deterministic run lifecycle (bridge v2). Older editor builds omit both —
+  // pollers must fall back to the idle heuristic when undefined.
+  runId?: number;
+  lastRunStatus?: BridgeRunStatus;
 }
 
 export type BridgeInterruptType =
@@ -62,6 +68,8 @@ export interface RendleyAgentWindowApi {
   getMessages: () => BridgeMessage[];
   resumeInterrupt: (response: "approve" | "reject") => Promise<void>;
   ensureSaved: (timeoutMs?: number) => Promise<FlushSaveResult>;
+  // Bridge v2: direct save awaiting the actual PATCH. Optional on older builds.
+  saveNow?: (timeoutMs?: number) => Promise<FlushSaveResult>;
   exportProject: (config?: BridgeExportConfig) => Promise<BridgeExportResult>;
 }
 

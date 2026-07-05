@@ -18,4 +18,8 @@ export interface PollOptions {
   autoApprove: boolean;
   logger?: Logger;
   onProgress?: (message: string) => Promise<void> | void;
+  // Bridge runId observed BEFORE sendMessage. Deterministic completion only
+  // trusts a terminal lastRunStatus whose runId is beyond this floor, so a
+  // stale terminal state (reused page) can't complete a run that never started.
+  runIdFloor?: number;
 }

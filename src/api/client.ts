@@ -62,6 +62,78 @@ export interface BatchUploadCompleteResponse {
 export interface BrandkitColor {
   id: string;
   value: string;
+  name?: string;
+  /** One of primary | secondary | accent | background | text | neutral. */
+  role?: string | null;
+}
+
+/** Machine-readable brand voice the AI agent reads to stay on-brand. All fields optional. */
+export interface BrandVoice {
+  audience?: string;
+  tone?: string;
+  energy?: string;
+  notes?: string;
+}
+
+export interface BrandkitProfile {
+  id: string;
+  workspace_id: string;
+  website_url?: string | null;
+  summary?: string | null;
+  tone?: string | null;
+  onboarded: boolean;
+  brand_voice: BrandVoice;
+}
+
+export interface BrandkitFont {
+  id: string;
+  font_id: string;
+  name: string;
+  source: string; // "google" | "brandkit"
+  is_pro: boolean;
+  role?: string | null;
+  order: number;
+  source_url?: string;
+}
+
+export interface BrandkitTextStyle {
+  role: string; // title | subtitle | heading | body | label
+  font_id?: string | null;
+  font_name?: string | null;
+  font_source?: string | null;
+  font_weight?: string | null;
+  font_size?: number | null;
+  line_height?: number | null;
+  letter_spacing?: number | null;
+  text_case?: string | null; // none | uppercase | lowercase | capitalize
+  text_align?: string | null; // left | center | right
+  color?: string | null;
+  color_role?: string | null;
+}
+
+export interface BrandkitTextStyleInput {
+  role: string;
+  font_id?: string;
+  font_weight?: string;
+  font_size?: number;
+  line_height?: number;
+  letter_spacing?: number;
+  text_case?: string;
+  text_align?: string;
+  color?: string;
+  color_role?: string;
+}
+
+export interface BrandkitVoice {
+  id: string;
+  model_id: string;
+  voice_id: string;
+  name?: string | null;
+  order: number;
+}
+
+export interface BrandkitCaptionStyle {
+  config: unknown;
 }
 
 export interface BrandkitUpload {
@@ -242,12 +314,38 @@ export class ApiClient {
     return json.data;
   }
 
+  async put<T>(path: string, body?: unknown): Promise<T> {
+    const res = await this.request(path, {
+      method: "PUT",
+      body: body ? JSON.stringify(body) : undefined,
+    });
+    const json = (await res.json()) as { data: T };
+    return json.data;
+  }
+
   async delete(path: string): Promise<void> {
     await this.request(path, { method: "DELETE" });
   }
 
   async listWorkspaces(): Promise<Workspace[]> {
     return this.get<Workspace[]>("/workspaces");
+  }
+
+  async createWorkspace(input: { name: string }): Promise<Workspace> {
+    return this.post<Workspace>("/workspaces", { name: input.name });
+  }
+
+  /**
+   * Return an existing workspace id, or create one if the user has none.
+   * Workspaces are provisioned client-side, so a user reaching the MCP may
+   * not have one yet — projects can't exist without a workspace.
+   */
+  async resolveOrCreateWorkspace(workspaceId?: string): Promise<string> {
+    if (workspaceId && workspaceId.trim() !== "") return workspaceId;
+    const workspaces = await this.listWorkspaces();
+    if (workspaces.length > 0) return workspaces[0].id;
+    const workspace = await this.createWorkspace({ name: "My workspace" });
+    return workspace.id;
   }
 
   async listProjects(workspaceId: string): Promise<Project[]> {
@@ -310,11 +408,65 @@ export class ApiClient {
 
   async addBrandkitColor(
     workspaceId: string,
-    color: string,
+    input: { color: string; name?: string; role?: string },
   ): Promise<BrandkitColor> {
     return this.post<BrandkitColor>(
       `/brandkit/${encodeURIComponent(workspaceId)}/colors`,
-      { color },
+      { color: input.color, name: input.name, role: input.role },
+    );
+  }
+
+  async getBrandkitProfile(workspaceId: string): Promise<BrandkitProfile> {
+    return this.get<BrandkitProfile>(
+      `/brandkit/${encodeURIComponent(workspaceId)}`,
+    );
+  }
+
+  async updateBrandVoice(
+    workspaceId: string,
+    brandVoice: BrandVoice,
+  ): Promise<BrandkitProfile> {
+    return this.put<BrandkitProfile>(
+      `/brandkit/${encodeURIComponent(workspaceId)}/brand-voice`,
+      { brand_voice: brandVoice },
+    );
+  }
+
+  async listBrandkitFonts(workspaceId: string): Promise<BrandkitFont[]> {
+    return this.get<BrandkitFont[]>(
+      `/brandkit/${encodeURIComponent(workspaceId)}/fonts`,
+    );
+  }
+
+  async listBrandkitTextStyles(
+    workspaceId: string,
+  ): Promise<BrandkitTextStyle[]> {
+    return this.get<BrandkitTextStyle[]>(
+      `/brandkit/${encodeURIComponent(workspaceId)}/text-styles`,
+    );
+  }
+
+  async upsertBrandkitTextStyle(
+    workspaceId: string,
+    style: BrandkitTextStyleInput,
+  ): Promise<void> {
+    await this.put(
+      `/brandkit/${encodeURIComponent(workspaceId)}/text-styles`,
+      style,
+    );
+  }
+
+  async getBrandkitCaptionStyle(
+    workspaceId: string,
+  ): Promise<BrandkitCaptionStyle> {
+    return this.get<BrandkitCaptionStyle>(
+      `/brandkit/${encodeURIComponent(workspaceId)}/caption-style`,
+    );
+  }
+
+  async listBrandkitVoices(workspaceId: string): Promise<BrandkitVoice[]> {
+    return this.get<BrandkitVoice[]>(
+      `/brandkit/${encodeURIComponent(workspaceId)}/voices`,
     );
   }
 
@@ -360,17 +512,12 @@ export class ApiClient {
   ): Promise<string> {
     if (projectId && projectId.trim() !== "") return projectId;
 
-    const workspaces = await this.listWorkspaces();
-    if (workspaces.length === 0) {
-      throw new Error(
-        "no workspaces available — create one in the Rendley dashboard first",
-      );
-    }
+    const workspaceId = await this.resolveOrCreateWorkspace();
 
     const name = (opts.prompt ?? "").trim().slice(0, 80) || "Agent job";
     const project = await this.createProject({
       name,
-      workspaceId: workspaces[0].id,
+      workspaceId,
     });
     return project.id;
   }

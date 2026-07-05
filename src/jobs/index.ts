@@ -1,7 +1,16 @@
+import { config } from "@/config";
+import { log } from "@/logger";
 import type { CreateJobInput, Job, JobStore } from "@/types/jobs.types";
 import { createMemoryJobStore } from "@/jobs/memory-store";
+import { createRedisJobStore } from "@/jobs/redis-store";
 
-const store: JobStore = createMemoryJobStore();
+const store: JobStore = config.redisUrl
+  ? createRedisJobStore(config.redisUrl)
+  : createMemoryJobStore();
+
+log.info("job_store_selected", {
+  store: config.redisUrl ? "redis" : "memory",
+});
 
 export function createJob(input: CreateJobInput): Promise<Job> {
   return store.create(input);

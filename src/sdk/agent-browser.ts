@@ -8,6 +8,11 @@ export interface RunAgentInput {
   attachments?: BridgeAttachment[];
   threadId?: string | null;
   maxWaitMs?: number;
+  // Warm-session reuse hints for the remote browser worker (ignored by the
+  // local browser and by old worker builds): a stable tenant+project+thread
+  // key and how long to hold the session after a successful run.
+  sessionKey?: string;
+  holdMs?: number;
 }
 
 export type AgentProgress = (message: string) => Promise<void> | void;

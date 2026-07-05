@@ -26,7 +26,12 @@ export class BrowserBusyError extends RemoteBrowserError {
 type WorkerEvent =
   | { type: "progress"; message: string }
   | { type: "ping" }
-  | { type: "result"; outcome: PollOutcome }
+  | {
+      type: "result";
+      outcome: PollOutcome;
+      // Session-reuse observability from newer worker builds.
+      meta?: { reusedSession?: boolean; held?: boolean; sessionRunCount?: number };
+    }
   | { type: "error"; code: string; message: string; retryAfterSeconds?: number };
 
 const sleep = (ms: number, signal?: AbortSignal): Promise<void> =>
@@ -157,6 +162,12 @@ export class RemoteAgentBrowser extends AgentBrowser {
           break;
         case "result":
           outcome = evt.outcome;
+          if (evt.meta) {
+            log.info("remote_agent_session_meta", {
+              projectId: input.projectId,
+              ...evt.meta,
+            });
+          }
           break;
         case "error":
           if (evt.code === "BROWSER_BUSY") {

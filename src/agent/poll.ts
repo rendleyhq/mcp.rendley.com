@@ -2,6 +2,7 @@ import { bridge } from "@/bridge/index";
 import { log } from "@/logger";
 import { config } from "@/config";
 import type { PollOptions, PollOutcome } from "@/types/agent.types";
+import type { BridgeStatus } from "@/types/bridge.types";
 
 export type { PollOptions, PollOutcome };
 
@@ -33,6 +34,20 @@ async function sampleJsHeap(page: import("playwright").Page): Promise<HeapSample
   }
 }
 
+// Deterministic completion (bridge v2): the editor reports the run lifecycle
+// directly, so we exit the instant the run reaches a terminal state instead of
+// waiting for IDLE_CONFIRMATIONS quiet ticks. Only trusted when the terminal
+// state belongs to a run started after `runIdFloor` (guards reused pages).
+function terminalRunState(
+  status: BridgeStatus,
+  runIdFloor: number,
+): "completed" | "error" | "cancelled" | null {
+  const runStatus = status.lastRunStatus;
+  if (runStatus !== "completed" && runStatus !== "error" && runStatus !== "cancelled") return null;
+  if ((status.runId ?? 0) <= runIdFloor) return null;
+  return runStatus;
+}
+
 export async function pollAgentCore(opts: PollOptions): Promise<PollOutcome> {
   const { page, projectId, release, maxWaitMs, autoApprove } = opts;
   const logger = (opts.logger ?? log).child({
@@ -40,6 +55,7 @@ export async function pollAgentCore(opts: PollOptions): Promise<PollOutcome> {
     component: "pollAgentCore",
   });
   const onProgress = opts.onProgress ?? (() => {});
+  const runIdFloor = opts.runIdFloor ?? 0;
 
   let lastCommandCount = 0;
   let lastStreaming: boolean | null = null;
@@ -52,7 +68,42 @@ export async function pollAgentCore(opts: PollOptions): Promise<PollOutcome> {
 
   const saveBeforeCut = async () => {
     if (lastCommandCount <= 0) return;
-    await bridge.ensureSaved(page, ENSURE_SAVED_TIMEOUT_MS).catch(() => {});
+    await bridge.flushSave(page, ENSURE_SAVED_TIMEOUT_MS).catch(() => {});
+  };
+
+  // Shared completion tail: read the final message, flush the save with
+  // retries, and return the outcome. Used by both the deterministic exit and
+  // the legacy idle-heuristic exit.
+  const finishCompleted = async (status: BridgeStatus, mode: string): Promise<PollOutcome> => {
+    const messages = await bridge.getMessages(page);
+    const lastMessage = bridge.lastAssistantContent(messages);
+
+    // Flush save before close, else the context teardown races an in-flight PATCH and drops edits.
+    await onProgress("Saving project…");
+    let save: { status: string } = { status: "unknown" };
+    for (let attempt = 1; attempt <= SAVE_ATTEMPTS; attempt++) {
+      try {
+        save = await bridge.flushSave(page, ENSURE_SAVED_TIMEOUT_MS);
+      } catch (err) {
+        save = { status: `error:${err instanceof Error ? err.message : String(err)}` };
+      }
+      if (save.status === "synced") break;
+      logger.warn("save_retry", { attempt, saveStatus: save.status, mode });
+    }
+
+    if (save.status !== "synced") {
+      await close();
+      logger.warn("save_not_confirmed", { saveStatus: save.status, mode });
+      return { kind: "save_failed", saveStatus: save.status, lastMessage };
+    }
+
+    await close();
+    logger.info("completed", {
+      commandExecutions: status.commandExecutions,
+      mode,
+      closed: true,
+    });
+    return { kind: "completed", status, lastMessage };
   };
 
   const startTime = Date.now();
@@ -89,7 +140,7 @@ export async function pollAgentCore(opts: PollOptions): Promise<PollOutcome> {
 
     if (status.lastError && !status.isStreaming) {
       if (status.commandExecutions > 0) {
-        await bridge.ensureSaved(page, ENSURE_SAVED_TIMEOUT_MS).catch(() => {});
+        await bridge.flushSave(page, ENSURE_SAVED_TIMEOUT_MS).catch(() => {});
       }
       const messages = await bridge.getMessages(page).catch(() => []);
       const lastMessage = bridge.lastAssistantContent(messages);
@@ -140,6 +191,33 @@ export async function pollAgentCore(opts: PollOptions): Promise<PollOutcome> {
       return { kind: "interrupt", status, lastMessage };
     }
 
+    // Deterministic path (bridge v2): the editor tells us the run ended.
+    if (status.lastRunStatus !== undefined) {
+      const terminal = terminalRunState(status, runIdFloor);
+      if (terminal === "error" || terminal === "cancelled") {
+        if (status.commandExecutions > 0) {
+          await bridge.flushSave(page, ENSURE_SAVED_TIMEOUT_MS).catch(() => {});
+        }
+        const messages = await bridge.getMessages(page).catch(() => []);
+        const lastMessage = bridge.lastAssistantContent(messages);
+        await close();
+        logger.warn("agent_run_terminal", { runStatus: terminal, ticks });
+        return {
+          kind: "error",
+          status,
+          error: status.lastError ?? `Agent run ${terminal}`,
+          lastMessage,
+        };
+      }
+      if (terminal === "completed") {
+        return await finishCompleted(status, "deterministic");
+      }
+      // Run still in flight — no idle-heuristic bookkeeping needed.
+      continue;
+    }
+
+    // Legacy heuristic (old editor builds without lastRunStatus): declare
+    // completion after IDLE_CONFIRMATIONS consecutive quiet ticks.
     if (!status.isStreaming && !status.isSyncing && status.messageCount > 1) {
       idleCount++;
     } else {
@@ -152,47 +230,7 @@ export async function pollAgentCore(opts: PollOptions): Promise<PollOutcome> {
         idleCount = 0;
         continue;
       }
-
-      const messages = await bridge.getMessages(page);
-      const lastMessage = bridge.lastAssistantContent(messages);
-
-      // Flush save before close, else the context teardown races an in-flight PATCH and drops edits.
-      await onProgress("Saving project…");
-      let save: { status: string } = { status: "unknown" };
-      for (let attempt = 1; attempt <= SAVE_ATTEMPTS; attempt++) {
-        try {
-          save = await bridge.ensureSaved(page, ENSURE_SAVED_TIMEOUT_MS);
-        } catch (err) {
-          save = { status: `error:${err instanceof Error ? err.message : String(err)}` };
-        }
-        if (save.status === "synced") break;
-        logger.warn("save_retry", { attempt, saveStatus: save.status, ticks });
-      }
-
-      if (save.status !== "synced") {
-        await close();
-        logger.warn("save_not_confirmed", {
-          saveStatus: save.status,
-          ticks,
-        });
-        return {
-          kind: "save_failed",
-          saveStatus: save.status,
-          lastMessage,
-        };
-      }
-
-      await close();
-      logger.info("completed", {
-        commandExecutions: finalStatus?.commandExecutions ?? 0,
-        ticks,
-        closed: true,
-      });
-      return {
-        kind: "completed",
-        status: finalStatus ?? status,
-        lastMessage,
-      };
+      return await finishCompleted(finalStatus ?? status, "idle_heuristic");
     }
   }
 
