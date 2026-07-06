@@ -95,6 +95,9 @@ const EnvSchema = z.object({
   // Abort a worker run if no stream event (progress, result, or ping heartbeat)
   // arrives within this window, instead of waiting out the full run deadline.
   WORKER_STALL_TIMEOUT_MS: intSchema(60 * 1000),
+  // Cadence of the "still working" progress ping sent to the MCP client during
+  // the synchronous window, so a quiet run doesn't look like a dead connection.
+  MCP_HEARTBEAT_MS: intSchema(25 * 1000),
   CHROMIUM_JS_HEAP_MB: intSchema(defaults.chromiumJsHeapMb),
   HEADLESS: boolSchema(defaults.headless),
   USE_CHROME_CHANNEL: boolSchema(defaults.useChromeChannel),
@@ -127,6 +130,7 @@ export const config = {
   agentTimeoutMs: env.AGENT_TIMEOUT_MS,
   syncWindowMs: env.SYNC_WINDOW_MS,
   workerStallTimeoutMs: env.WORKER_STALL_TIMEOUT_MS,
+  heartbeatMs: env.MCP_HEARTBEAT_MS,
   chromiumJsHeapMb: env.CHROMIUM_JS_HEAP_MB,
   headless: env.HEADLESS,
   useChromeChannel: env.USE_CHROME_CHANNEL,

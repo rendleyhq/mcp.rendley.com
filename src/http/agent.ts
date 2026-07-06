@@ -4,7 +4,7 @@ import { runAgentJob } from "@/agent-runner";
 import type { BridgeAttachment } from "@/types/bridge.types";
 import { createJob, jobToResponse, updateJob } from "@/jobs/index";
 import { registerJobAbort, unregisterJobAbort } from "@/jobs/cancellation";
-import { JobStatus } from "@/types/jobs.types";
+import { JobKind, JobStatus } from "@/types/jobs.types";
 import { log } from "@/logger";
 import { getQueueStats, isQueueFull, runQueued } from "@/queue";
 import { validateExternalUrl, UrlGuardError } from "@/utils/url-guard";
@@ -238,7 +238,7 @@ export async function handleStartAgentJob(
   let job: Awaited<ReturnType<typeof createJob>>;
   try {
     job = await createJob({
-      kind: "agent",
+      kind: JobKind.Agent,
       project_id: projectId,
       owner_key_id: deps.apiKeyId,
       thread_id: resolvedThreadId,

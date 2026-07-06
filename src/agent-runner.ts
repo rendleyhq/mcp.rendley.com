@@ -8,7 +8,6 @@ import type { BridgeAttachment } from "@/types/bridge.types";
 import type { Job } from "@/types/jobs.types";
 import { JobStatus } from "@/types/jobs.types";
 
-// Keep only the most recent progress lines on the job record.
 const PROGRESS_RING_SIZE = 20;
 
 interface RunInput {

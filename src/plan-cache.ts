@@ -1,4 +1,5 @@
 import type { ApiClient, PlanTier } from "@/api/client";
+import { classifyPlanTier } from "@/api/client";
 import { log } from "@/logger";
 import { recordPlanDowngrade } from "@/metrics";
 
@@ -7,75 +8,72 @@ const ERROR_TTL_MS = 10_000;
 
 const MAX_CACHE_ENTRIES = 10_000;
 
-function sweepExpired(map: Map<string, { expiresAt: number }>, now: number): void {
-  for (const [key, entry] of map) {
-    if (entry.expiresAt <= now) map.delete(key);
+// Concurrent-edit cap used when /users/me can't be reached; fails open to a
+// modest value so a transient blip never blocks a paying user.
+const FALLBACK_MAX_CONCURRENT = 3;
+
+interface PlanInfo {
+  tier: PlanTier;
+  maxConcurrent: number;
+}
+
+const cache = new Map<string, { info: PlanInfo; expiresAt: number }>();
+
+function sweepExpired(now: number): void {
+  for (const [key, entry] of cache) {
+    if (entry.expiresAt <= now) cache.delete(key);
   }
 }
 
-// ── plan tier (paid-plan gate) ───────────────────────────────────────────────
-const tierCache = new Map<string, { tier: PlanTier; expiresAt: number }>();
+// Resolves the user's plan info (tier + concurrent-edit cap) from /users/me,
+// cached briefly. On a lookup failure it degrades gracefully rather than
+// throwing: it reuses the last known value (even if expired), and with nothing
+// cached it assumes a paid tier (fail-open) — so a transient /users/me blip
+// never wrongly blocks a paying user from the paid-only MCP.
+async function resolvePlanInfo(
+  userId: string,
+  apiClient: ApiClient,
+): Promise<PlanInfo> {
+  const now = Date.now();
+  const hit = cache.get(userId);
+  if (hit && hit.expiresAt > now) return hit.info;
+  const lastKnown = hit?.info;
+  if (hit) cache.delete(userId);
+  if (cache.size > MAX_CACHE_ENTRIES) sweepExpired(now);
 
-// Resolves the user's plan tier, cached briefly. On a lookup failure it
-// degrades gracefully rather than throwing: it reuses the last known tier
-// (even if expired), and with nothing cached it assumes a paid tier
-// (fail-open) — so a transient /users/me blip never wrongly blocks a paying
-// user from the paid-only MCP.
+  try {
+    const me = await apiClient.getMe();
+    const sub = me.subscription;
+    const info: PlanInfo = {
+      tier: classifyPlanTier(sub?.plan_name),
+      maxConcurrent: sub?.mcp_agent_max_concurrent ?? FALLBACK_MAX_CONCURRENT,
+    };
+    cache.set(userId, { info, expiresAt: now + HIT_TTL_MS });
+    return info;
+  } catch (err) {
+    recordPlanDowngrade();
+    log.warn("plan_info_resolve_failed", {
+      err: err instanceof Error ? err.message : String(err),
+    });
+    const info: PlanInfo = lastKnown ?? {
+      tier: "starter",
+      maxConcurrent: FALLBACK_MAX_CONCURRENT,
+    };
+    cache.set(userId, { info, expiresAt: now + ERROR_TTL_MS });
+    return info;
+  }
+}
+
 export async function resolvePlanTier(
   userId: string,
   apiClient: ApiClient,
 ): Promise<PlanTier> {
-  const now = Date.now();
-  const hit = tierCache.get(userId);
-  if (hit && hit.expiresAt > now) return hit.tier;
-  const lastKnown = hit?.tier;
-  if (hit) tierCache.delete(userId);
-  if (tierCache.size > MAX_CACHE_ENTRIES) sweepExpired(tierCache, now);
-
-  try {
-    const tier = await apiClient.getPlanTier();
-    tierCache.set(userId, { tier, expiresAt: now + HIT_TTL_MS });
-    return tier;
-  } catch (err) {
-    recordPlanDowngrade();
-    log.warn("plan_tier_resolve_failed", {
-      err: err instanceof Error ? err.message : String(err),
-    });
-    const tier = lastKnown ?? "starter";
-    tierCache.set(userId, { tier, expiresAt: now + ERROR_TTL_MS });
-    return tier;
-  }
+  return (await resolvePlanInfo(userId, apiClient)).tier;
 }
-
-// ── concurrent-edit cap ──────────────────────────────────────────────────────
-// The backend owns the value (GET /agent/limits, derived from the plan); this
-// cache only avoids a round-trip per request. Fails open to the last known
-// value (or a modest default) so a blip never blocks a paying user.
-const FALLBACK_MAX_CONCURRENT = 3;
-const limitsCache = new Map<string, { max: number; expiresAt: number }>();
 
 export async function resolveMcpMaxConcurrent(
   userId: string,
   apiClient: ApiClient,
 ): Promise<number> {
-  const now = Date.now();
-  const hit = limitsCache.get(userId);
-  if (hit && hit.expiresAt > now) return hit.max;
-  const lastKnown = hit?.max;
-  if (hit) limitsCache.delete(userId);
-  if (limitsCache.size > MAX_CACHE_ENTRIES) sweepExpired(limitsCache, now);
-
-  try {
-    const limits = await apiClient.getAgentLimits();
-    const max = limits.mcp_agent_max_concurrent;
-    limitsCache.set(userId, { max, expiresAt: now + HIT_TTL_MS });
-    return max;
-  } catch (err) {
-    log.warn("agent_limits_resolve_failed", {
-      err: err instanceof Error ? err.message : String(err),
-    });
-    const max = lastKnown ?? FALLBACK_MAX_CONCURRENT;
-    limitsCache.set(userId, { max, expiresAt: now + ERROR_TTL_MS });
-    return max;
-  }
+  return (await resolvePlanInfo(userId, apiClient)).maxConcurrent;
 }

@@ -3,6 +3,7 @@ import { log } from "@/logger";
 import { config } from "@/config";
 import type { PollOptions, PollOutcome } from "@/types/agent.types";
 import type { BridgeStatus } from "@/types/bridge.types";
+import { BridgeInterruptType, BridgeRunStatus } from "@/types/bridge.types";
 
 export type { PollOptions, PollOutcome };
 
@@ -41,9 +42,15 @@ async function sampleJsHeap(page: import("playwright").Page): Promise<HeapSample
 function terminalRunState(
   status: BridgeStatus,
   runIdFloor: number,
-): "completed" | "error" | "cancelled" | null {
+): BridgeRunStatus.Completed | BridgeRunStatus.Error | BridgeRunStatus.Cancelled | null {
   const runStatus = status.lastRunStatus;
-  if (runStatus !== "completed" && runStatus !== "error" && runStatus !== "cancelled") return null;
+  if (
+    runStatus !== BridgeRunStatus.Completed &&
+    runStatus !== BridgeRunStatus.Error &&
+    runStatus !== BridgeRunStatus.Cancelled
+  ) {
+    return null;
+  }
   if ((status.runId ?? 0) <= runIdFloor) return null;
   return runStatus;
 }
@@ -71,9 +78,7 @@ export async function pollAgentCore(opts: PollOptions): Promise<PollOutcome> {
     await bridge.flushSave(page, ENSURE_SAVED_TIMEOUT_MS).catch(() => {});
   };
 
-  // Shared completion tail: read the final message, flush the save with
-  // retries, and return the outcome. Used by both the deterministic exit and
-  // the legacy idle-heuristic exit.
+  // Used by both the deterministic exit and the legacy idle-heuristic exit.
   const finishCompleted = async (status: BridgeStatus, mode: string): Promise<PollOutcome> => {
     const messages = await bridge.getMessages(page);
     const lastMessage = bridge.lastAssistantContent(messages);
@@ -173,7 +178,7 @@ export async function pollAgentCore(opts: PollOptions): Promise<PollOutcome> {
 
     if (status.hasInterrupt) {
       // Never blind-approve request_upgrade: "approve" can't satisfy a paywall.
-      if (autoApprove && status.interruptType !== "request_upgrade") {
+      if (autoApprove && status.interruptType !== BridgeInterruptType.RequestUpgrade) {
         await bridge.resumeInterrupt(page, "approve");
         idleCount = 0;
         await onProgress(`Auto-approved ${status.interruptType ?? "interrupt"}`);
@@ -194,7 +199,7 @@ export async function pollAgentCore(opts: PollOptions): Promise<PollOutcome> {
     // Deterministic path (bridge v2): the editor tells us the run ended.
     if (status.lastRunStatus !== undefined) {
       const terminal = terminalRunState(status, runIdFloor);
-      if (terminal === "error" || terminal === "cancelled") {
+      if (terminal === BridgeRunStatus.Error || terminal === BridgeRunStatus.Cancelled) {
         if (status.commandExecutions > 0) {
           await bridge.flushSave(page, ENSURE_SAVED_TIMEOUT_MS).catch(() => {});
         }
@@ -209,7 +214,7 @@ export async function pollAgentCore(opts: PollOptions): Promise<PollOutcome> {
           lastMessage,
         };
       }
-      if (terminal === "completed") {
+      if (terminal === BridgeRunStatus.Completed) {
         return await finishCompleted(status, "deterministic");
       }
       // Run still in flight — no idle-heuristic bookkeeping needed.

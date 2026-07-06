@@ -186,6 +186,7 @@ export interface CurrentUser {
     brandkit: boolean;
     workspaces: number;
     storage_bytes: number;
+    mcp_agent_max_concurrent: number;
     transcription_seconds: number;
   } | null;
   usage?: {
@@ -376,19 +377,6 @@ export class ApiClient {
     return this.get<CurrentUser>("/users/me");
   }
 
-  async getPlanTier(): Promise<PlanTier> {
-    const res = await fetch(this.url("/users/me"), {
-      method: "GET",
-      headers: this.headers,
-      signal: AbortSignal.timeout(10_000),
-    });
-    if (!res.ok) throw await toApiError(res);
-    const json = (await res.json()) as {
-      data?: { subscription?: { plan_name?: string } | null };
-    };
-    return classifyPlanTier(json?.data?.subscription?.plan_name);
-  }
-
   async resolveWorkspaceId(workspaceId?: string): Promise<string> {
     if (workspaceId && workspaceId.trim() !== "") return workspaceId;
     const workspaces = await this.listWorkspaces();
@@ -527,12 +515,6 @@ export class ApiClient {
       project_id: projectId,
     });
     return thread.ID;
-  }
-
-  // Plan-derived agent limits — the backend owns the values; the MCP reads
-  // them instead of holding its own copies.
-  async getAgentLimits(): Promise<{ mcp_agent_max_concurrent: number }> {
-    return this.get<{ mcp_agent_max_concurrent: number }>("/agent/limits");
   }
 
   async getLastAgentThread(projectId: string): Promise<string | null> {

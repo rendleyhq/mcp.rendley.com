@@ -76,8 +76,6 @@ export function registerBrandkitTools(server: McpServer, apiClient: ApiClient) {
     async ({ workspace_id }) => {
       try {
         const wsId = await apiClient.resolveWorkspaceId(workspace_id);
-        // Each section is read best-effort so one unavailable section (e.g. a
-        // plan-gated one) doesn't blank out the rest of the kit.
         const [
           profile,
           colors,

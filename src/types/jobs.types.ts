@@ -6,7 +6,10 @@ export enum JobStatus {
   Cancelled = "cancelled",
 }
 
-export type JobKind = "agent" | "export";
+export enum JobKind {
+  Agent = "agent",
+  Export = "export",
+}
 
 export interface Job {
   job_id: string;

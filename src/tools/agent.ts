@@ -9,7 +9,8 @@ import { createJob, getJob, updateJob } from "@/jobs/index";
 import { registerJobAbort, unregisterJobAbort, abortJob } from "@/jobs/cancellation";
 import { cancelAgentJob } from "@/agent-cancel";
 import type { Job } from "@/types/jobs.types";
-import { JobStatus } from "@/types/jobs.types";
+import { JobKind, JobStatus } from "@/types/jobs.types";
+import { BridgeInterruptType } from "@/types/bridge.types";
 import { validateExternalUrl } from "@/utils/url-guard";
 import {
   acquireAll,
@@ -152,7 +153,7 @@ function formatJobResult(job: Job) {
   // Failed — branch on the runner's terminal reason.
   const reason = result.reason as string | undefined;
 
-  if (reason === "unexpected_interrupt" && result.interrupt_type === "request_upgrade") {
+  if (reason === "unexpected_interrupt" && result.interrupt_type === BridgeInterruptType.RequestUpgrade) {
     return {
       content: [
         {
@@ -168,7 +169,7 @@ function formatJobResult(job: Job) {
       structuredContent: {
         ...structuredContent,
         status: "needs_upgrade",
-        interrupt_type: "request_upgrade",
+        interrupt_type: BridgeInterruptType.RequestUpgrade,
       },
     };
   }
@@ -404,7 +405,7 @@ export function registerAgentTools(server: McpServer, deps: AgentToolDeps) {
         }
 
         const job = await createJob({
-          kind: "agent",
+          kind: JobKind.Agent,
           project_id,
           owner_key_id: apiKeyId,
           thread_id: resolvedThreadId,
@@ -421,10 +422,8 @@ export function registerAgentTools(server: McpServer, deps: AgentToolDeps) {
         const mcpProgress = progressFromExtra(extra);
         let windowOpen = true;
 
-        // Heartbeat: during quiet stretches (long model turn, long generation
-        // step) the runner emits nothing — send a progress notification anyway
-        // so the client/proxy never sees a silent connection and times out.
-        const HEARTBEAT_MS = 25_000;
+        // During quiet stretches the runner emits nothing; send a progress ping
+        // anyway so the client/proxy never sees a silent connection and times out.
         let lastProgressSentAt = Date.now();
         const sendProgress = async (msg: string) => {
           lastProgressSentAt = Date.now();
@@ -432,10 +431,10 @@ export function registerAgentTools(server: McpServer, deps: AgentToolDeps) {
         };
         heartbeat = setInterval(() => {
           if (!windowOpen) return;
-          if (Date.now() - lastProgressSentAt >= HEARTBEAT_MS) {
+          if (Date.now() - lastProgressSentAt >= config.heartbeatMs) {
             void sendProgress("Still working…");
           }
-        }, HEARTBEAT_MS);
+        }, config.heartbeatMs);
         heartbeat.unref?.();
 
         const abort = registerJobAbort(job.job_id);
@@ -468,33 +467,36 @@ export function registerAgentTools(server: McpServer, deps: AgentToolDeps) {
           });
         backgroundLaunched = true;
 
-        // While the synchronous window is open, a client cancel (Claude/ChatGPT
-        // "stop") aborts the run. Detached after handoff so a completed request
-        // can't kill a job that legitimately continues in the background.
+        // A client cancel ("stop") aborts the run only while the synchronous
+        // window is open; detached in the finally so a completed request can't
+        // kill a job that legitimately continues in the background.
         const onClientCancel = () => abortJob(job.job_id);
-        extra?.signal?.addEventListener("abort", onClientCancel, { once: true });
-
-        // Hybrid contract: give fast edits a one-shot synchronous answer, and
-        // hand longer ones back as a job_id for check_edit polling instead of
-        // blocking past typical MCP client timeouts.
         let windowTimer: ReturnType<typeof setTimeout> | undefined;
-        const raced = await Promise.race([
-          runPromise.then((finished) => ({ done: true as const, finished })),
-          new Promise<{ done: false }>((resolve) => {
-            windowTimer = setTimeout(() => resolve({ done: false }), config.syncWindowMs);
-          }),
-        ]);
-        if (windowTimer) clearTimeout(windowTimer);
-        clearInterval(heartbeat);
-        extra?.signal?.removeEventListener("abort", onClientCancel);
-        windowOpen = false;
+        try {
+          extra?.signal?.addEventListener("abort", onClientCancel, { once: true });
 
-        if (raced.done && raced.finished) {
-          return formatJobResult(raced.finished);
+          // Fast edits get a one-shot synchronous answer; longer ones are handed
+          // back as a job_id for check_edit polling once the window expires.
+          const raced = await Promise.race([
+            runPromise.then((finished) => ({ done: true as const, finished })),
+            new Promise<{ done: false }>((resolve) => {
+              windowTimer = setTimeout(() => resolve({ done: false }), config.syncWindowMs);
+              windowTimer.unref?.();
+            }),
+          ]);
+
+          if (raced.done && raced.finished) {
+            return formatJobResult(raced.finished);
+          }
+
+          const current = await getJob(job.job_id).catch(() => null);
+          return formatInProgress(current ?? job);
+        } finally {
+          clearTimeout(windowTimer);
+          clearInterval(heartbeat);
+          extra?.signal?.removeEventListener("abort", onClientCancel);
+          windowOpen = false;
         }
-
-        const current = await getJob(job.job_id).catch(() => null);
-        return formatInProgress(current ?? job);
       } catch (err) {
         if (heartbeat) clearInterval(heartbeat);
         if (!backgroundLaunched) releaseSlots();
@@ -525,9 +527,9 @@ export function registerAgentTools(server: McpServer, deps: AgentToolDeps) {
     async ({ job_id }) => {
       const job = await getJob(job_id);
       // Wrong-owner reads the same as missing so job ids can't be enumerated.
-      if (!job || job.owner_key_id !== apiKeyId || job.kind !== "agent") {
+      if (!job || job.owner_key_id !== apiKeyId || job.kind !== JobKind.Agent) {
         return fail(
-          "No edit job found with this id — it may have expired (results are kept for about 24 hours). Re-run edit_video if needed.",
+          "This edit could no longer be found — it may have finished a while ago. Run the edit again if you still need it.",
         );
       }
 
@@ -561,7 +563,7 @@ export function registerAgentTools(server: McpServer, deps: AgentToolDeps) {
       const outcome = await cancelAgentJob(job_id, apiKeyId);
       if (outcome.status === "not_found") {
         return fail(
-          "No edit job found with this id — it may have expired (results are kept for about 24 hours).",
+          "This edit could no longer be found — it may have already finished.",
         );
       }
       if (outcome.status === "already_done") {

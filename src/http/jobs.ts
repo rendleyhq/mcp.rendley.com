@@ -5,8 +5,7 @@ import { cancelAgentJob } from "@/agent-cancel";
 const JOB_ID_RE =
   /^[0-9a-f]{8}-[0-9a-f]{4}-[1-5][0-9a-f]{3}-[89ab][0-9a-f]{3}-[0-9a-f]{12}$/i;
 const NOT_FOUND_MESSAGE =
-  "job not found — completed jobs are evicted after about 24 hours; " +
-  "check the job id and retry the edit if it has expired";
+  "This edit could no longer be found. It may have finished a while ago — please run the edit again.";
 
 function jsonError(status: number, code: string, message: string): Response {
   return new Response(

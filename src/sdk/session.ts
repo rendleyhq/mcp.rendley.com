@@ -250,18 +250,6 @@ export async function acquireEditorPage(
   // our logs for the rest of the run. Gated so it never adds noise in prod.
   if (config.keepBrowserOpen) attachDebugStream(page, projectId);
 
-  // Editor-side boot phase timings (slim-boot observability); best-effort.
-  const bootTimings = await page
-    .evaluate(
-      () =>
-        (window as unknown as { __rendleyBootTimings?: Record<string, number> })
-          .__rendleyBootTimings ?? null,
-    )
-    .catch(() => null);
-  if (bootTimings) {
-    log.info("editor_boot_timings", { projectId, ...bootTimings });
-  }
-
   return page;
 }
 

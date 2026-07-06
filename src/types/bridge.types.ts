@@ -10,7 +10,13 @@ export interface BridgeMessage {
   error?: string;
 }
 
-export type BridgeRunStatus = "idle" | "running" | "completed" | "error" | "cancelled";
+export enum BridgeRunStatus {
+  Idle = "idle",
+  Running = "running",
+  Completed = "completed",
+  Error = "error",
+  Cancelled = "cancelled",
+}
 
 export interface BridgeStatus {
   isStreaming: boolean;
@@ -27,12 +33,13 @@ export interface BridgeStatus {
   lastRunStatus?: BridgeRunStatus;
 }
 
-export type BridgeInterruptType =
-  | "plan_review"
-  | "request_upgrade"
-  | "tool_review"
-  | "context_request"
-  | "command_execution";
+export enum BridgeInterruptType {
+  PlanReview = "plan_review",
+  RequestUpgrade = "request_upgrade",
+  ToolReview = "tool_review",
+  ContextRequest = "context_request",
+  CommandExecution = "command_execution",
+}
 
 export interface BridgeExportConfig {
   codec?: "h264" | "h265" | "vp9" | "vp8";
