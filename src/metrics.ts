@@ -19,7 +19,7 @@ const concurrencyRejectedCounter = meter.createCounter(
 const queueFullRejectedCounter = meter.createCounter("mcp.queue.full_rejected", {
   description: "Requests rejected because the queue hit its DoS ceiling.",
 });
-const planDowngradeCounter = meter.createCounter("mcp.plan_cap.downgraded", {
+const planResolveFailedCounter = meter.createCounter("mcp.plan_resolve.failed", {
   description: "Plan lookups (/users/me) that failed and fell back to the fail-open default (assume paid, fallback concurrency cap).",
 });
 
@@ -29,6 +29,6 @@ export function recordConcurrencyRejected(): void {
 export function recordQueueFullRejected(): void {
   queueFullRejectedCounter.add(1);
 }
-export function recordPlanDowngrade(): void {
-  planDowngradeCounter.add(1);
+export function recordPlanResolveFailed(): void {
+  planResolveFailedCounter.add(1);
 }

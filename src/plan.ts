@@ -1,6 +1,6 @@
 import type { ApiClient } from "@/api/client";
 import { log } from "@/logger";
-import { recordPlanDowngrade } from "@/metrics";
+import { recordPlanResolveFailed } from "@/metrics";
 
 // Concurrent-edit cap used when /users/me can't be reached; fails open to a
 // modest value so a transient blip never blocks a paying user.
@@ -24,7 +24,7 @@ async function resolvePlanInfo(apiClient: ApiClient): Promise<PlanInfo> {
       maxConcurrent: sub?.mcp_agent_max_concurrent ?? FALLBACK_MAX_CONCURRENT,
     };
   } catch (err) {
-    recordPlanDowngrade();
+    recordPlanResolveFailed();
     log.warn("plan_info_resolve_failed", {
       err: err instanceof Error ? err.message : String(err),
     });
