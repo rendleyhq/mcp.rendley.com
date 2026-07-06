@@ -2,16 +2,6 @@ import type { ApiClientConfig } from "@/types/api.types";
 
 export type { ApiClientConfig };
 
-export type PlanTier = "starter" | "pro" | "business" | "free";
-
-export function classifyPlanTier(planName?: string | null): PlanTier {
-  const n = (planName ?? "").toLowerCase();
-  if (n.includes("business")) return "business";
-  if (n.includes("pro")) return "pro";
-  if (n.includes("starter")) return "starter";
-  return "free";
-}
-
 export interface VerifiedApiKey {
   keyId: string;
   userId: string;

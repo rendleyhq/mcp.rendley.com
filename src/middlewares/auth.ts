@@ -2,7 +2,7 @@ import type { Context, MiddlewareHandler } from "hono";
 import { ApiClient } from "@/api/client";
 import { config, protectedResourceMetadataUrl } from "@/config";
 import { log } from "@/logger";
-import { resolvePlanTier } from "@/plan";
+import { isPaidPlan } from "@/plan";
 
 export type AppEnv = {
   Variables: {
@@ -105,11 +105,10 @@ export const requireBearer: MiddlewareHandler<AppEnv> = async (c, next) => {
 // Gates MCP surface (the /mcp endpoint and REST agent/brandkit routes) to paid
 // plans — the AI agent stays available in the app, but connecting it to an
 // external assistant is a paid feature. Runs after requireBearer, so userId and
-// apiClient are set. resolvePlanTier fails open (assumes paid on a lookup
-// error), so a transient /users/me blip never locks out a paying customer.
+// apiClient are set. isPaidPlan fails open (assumes paid on a lookup error), so
+// a transient /users/me blip never locks out a paying customer.
 export const requirePaidPlan: MiddlewareHandler<AppEnv> = async (c, next) => {
-  const tier = await resolvePlanTier(c.get("apiClient"));
-  if (tier === "free") {
+  if (!(await isPaidPlan(c.get("apiClient")))) {
     log.info("mcp_blocked_free_plan", { userId: c.get("userId") });
     return c.json(
       {
