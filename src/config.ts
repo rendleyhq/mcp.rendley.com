@@ -42,7 +42,9 @@ const constants = {
 // Defaults for the env-overridable tuning knobs below.
 const defaults = {
   queueConcurrency: 120,
-  queueMaxQueued: 1000,
+  // Global cap on edits in flight (waiting for a slot, queued, or running). The
+  // only hard rejection — per-tenant caps make requests wait, not fail.
+  queueMaxQueued: 2000,
   agentTimeoutMs: 8 * 60 * 1000,
   browserRecycleAfter: 8,
   chromiumJsHeapMb: 512,
@@ -86,17 +88,9 @@ const EnvSchema = z.object({
   QUEUE_MAX_QUEUED: intSchema(defaults.queueMaxQueued),
   BROWSER_RECYCLE_AFTER: intSchema(defaults.browserRecycleAfter),
   AGENT_TIMEOUT_MS: intSchema(defaults.agentTimeoutMs),
-  // How long edit_video blocks synchronously before handing back a job_id for
-  // check_edit polling. Edits regularly run several minutes (video generation
-  // steps), so the window is generous by default — progress notifications keep
-  // MCP clients alive during it. The run itself continues up to agentTimeoutMs.
-  SYNC_WINDOW_MS: intSchema(3 * 60 * 1000),
   // Abort a worker run if no stream event (progress, result, or ping heartbeat)
   // arrives within this window, instead of waiting out the full run deadline.
   WORKER_STALL_TIMEOUT_MS: intSchema(60 * 1000),
-  // Cadence of the "still working" progress ping sent to the MCP client during
-  // the synchronous window, so a quiet run doesn't look like a dead connection.
-  MCP_HEARTBEAT_MS: intSchema(25 * 1000),
   CHROMIUM_JS_HEAP_MB: intSchema(defaults.chromiumJsHeapMb),
   HEADLESS: boolSchema(defaults.headless),
   USE_CHROME_CHANNEL: boolSchema(defaults.useChromeChannel),
@@ -127,9 +121,7 @@ export const config = {
   queueMaxQueued: env.QUEUE_MAX_QUEUED,
   browserRecycleAfter: env.BROWSER_RECYCLE_AFTER,
   agentTimeoutMs: env.AGENT_TIMEOUT_MS,
-  syncWindowMs: env.SYNC_WINDOW_MS,
   workerStallTimeoutMs: env.WORKER_STALL_TIMEOUT_MS,
-  heartbeatMs: env.MCP_HEARTBEAT_MS,
   chromiumJsHeapMb: env.CHROMIUM_JS_HEAP_MB,
   headless: env.HEADLESS,
   useChromeChannel: env.USE_CHROME_CHANNEL,

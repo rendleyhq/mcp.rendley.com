@@ -264,6 +264,52 @@ export function registerProjectTools(server: McpServer, apiClient: ApiClient) {
   );
 
   server.registerTool(
+    "duplicate_project",
+    {
+      title: "Duplicate project",
+      description:
+        "Create a copy of an existing project, including its media assets. Returns the new project's project_id — use that for follow-up calls; the original is left untouched.",
+      inputSchema: {
+        project_id: z.string().regex(ID_RE).describe("Project to duplicate"),
+      },
+      outputSchema: outputAny,
+      annotations: {
+        readOnlyHint: false,
+        destructiveHint: false,
+        openWorldHint: false,
+      },
+    },
+    async ({ project_id }) => {
+      try {
+        const project = await apiClient.duplicateProject(project_id);
+        return {
+          content: [
+            {
+              type: "text" as const,
+              text:
+                `Duplicated into **${project.name}** (project_id: \`${project.id}\`)\n\n` +
+                "Use this new project_id for follow-up calls such as edit_video and export_project. The original project is unchanged.",
+            },
+          ],
+          structuredContent: {
+            project: {
+              id: project.id,
+              name: project.name,
+              workspace_id: project.workspace_id,
+              fit_duration: project.fit_duration,
+              thumbnail_url: project.thumbnail_url,
+              created_at: project.created_at,
+              updated_at: project.updated_at,
+            },
+          },
+        };
+      } catch (err) {
+        return fail(`Could not duplicate project: ${formatError(err)}`);
+      }
+    },
+  );
+
+  server.registerTool(
     "delete_project",
     {
       title: "Delete project",

@@ -359,6 +359,10 @@ export class ApiClient {
     return this.get<Project>(`/projects/${projectId}`);
   }
 
+  async duplicateProject(projectId: string): Promise<Project> {
+    return this.post<Project>(`/projects/${projectId}/duplicate`);
+  }
+
   async deleteProject(projectId: string): Promise<void> {
     await this.delete(`/projects/${projectId}`);
   }

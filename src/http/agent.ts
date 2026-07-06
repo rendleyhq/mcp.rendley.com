@@ -6,15 +6,16 @@ import { createJob, jobToResponse, updateJob } from "@/jobs/index";
 import { registerJobAbort, unregisterJobAbort } from "@/jobs/cancellation";
 import { JobKind, JobStatus } from "@/types/jobs.types";
 import { log } from "@/logger";
-import { getQueueStats, isQueueFull, runQueued } from "@/queue";
+import { getQueueStats, runQueued, tryReserveTask, releaseTask } from "@/queue";
 import { validateExternalUrl, UrlGuardError } from "@/utils/url-guard";
 import {
-  acquireAll,
+  acquireAllOrWait,
   resolveKeys,
   MAX_CONCURRENT_PER_END_USER,
+  SLOT_WAIT_TIMEOUT_MS,
 } from "@/concurrency-limits";
 import { resolveMcpMaxConcurrent } from "@/plan";
-import { recordConcurrencyRejected, recordQueueFullRejected } from "@/metrics";
+import { recordQueueFullRejected } from "@/metrics";
 
 interface Deps {
   apiClient: ApiClient;
@@ -67,27 +68,6 @@ function badRequest(code: string, message: string): Response {
   return json(400, { error: { code, message } });
 }
 
-const CONCURRENCY_RETRY_AFTER_SECONDS = 10;
-
-function concurrencyRejected(message: string): Response {
-  return new Response(
-    JSON.stringify({
-      error: {
-        code: "CONCURRENCY_LIMIT",
-        message,
-        retryAfterSeconds: CONCURRENCY_RETRY_AFTER_SECONDS,
-      },
-    }),
-    {
-      status: 429,
-      headers: {
-        "Content-Type": "application/json",
-        "Retry-After": String(CONCURRENCY_RETRY_AFTER_SECONDS),
-      },
-    },
-  );
-}
-
 function deriveAttachmentName(input: { url?: string; storage_url?: string; name?: string }): string | undefined {
   if (input.name?.trim()) return input.name.trim();
 
@@ -126,28 +106,6 @@ export async function handleStartAgentJob(
   }
   const body = parsed.data;
 
-  if (isQueueFull()) {
-    const stats = getQueueStats();
-    recordQueueFullRejected();
-    log.warn("queue_saturated_agent_rejected", stats);
-    return new Response(
-      JSON.stringify({
-        error: {
-          code: "QUEUE_FULL",
-          message: "MCP server is at capacity. Retry shortly.",
-          stats,
-        },
-      }),
-      {
-        status: 429,
-        headers: {
-          "Content-Type": "application/json",
-          "Retry-After": "10",
-        },
-      },
-    );
-  }
-
   for (const f of body.files) {
     for (const u of [f.url, f.storage_url]) {
       if (!u) continue;
@@ -171,36 +129,45 @@ export async function handleStartAgentJob(
     );
   }
 
-  // Fairness gate: the backend owns the plan's concurrent-edit cap
-  // (GET /agent/limits); we only count in-flight edits against it, so one
-  // user can't occupy every browser. The queue caps the global total.
-  const maxConcurrent = await resolveMcpMaxConcurrent(deps.apiClient);
-  const { tenantKey, endUserKey } = resolveKeys(deps.userId, endUserId);
-  const reqs = [{ key: tenantKey, max: maxConcurrent }];
-  if (endUserKey !== tenantKey) {
-    reqs.push({ key: endUserKey, max: MAX_CONCURRENT_PER_END_USER });
-  }
-  const acquired = await acquireAll(reqs);
-  if (!acquired) {
-    recordConcurrencyRejected();
-    log.warn("concurrency_limit_exceeded", { endUserId });
-    return concurrencyRejected(
-      "Too many concurrent edits right now. Retry shortly.",
+  // The only hard rejection is the global pending cap; the plan's per-tenant cap
+  // makes a request wait for a run slot (in the background below), not fail.
+  if (!tryReserveTask()) {
+    recordQueueFullRejected();
+    log.warn("pending_cap_reached_agent_rejected", getQueueStats());
+    return new Response(
+      JSON.stringify({
+        error: {
+          code: "QUEUE_FULL",
+          message: "The server has a lot of edits queued. Retry shortly.",
+          stats: getQueueStats(),
+        },
+      }),
+      {
+        status: 429,
+        headers: { "Content-Type": "application/json", "Retry-After": "10" },
+      },
     );
   }
-
-  let releaseSlots = () => acquired.release();
+  let reserved = true;
+  const releaseReserved = () => {
+    if (reserved) {
+      reserved = false;
+      releaseTask();
+    }
+  };
+  const maxConcurrent = await resolveMcpMaxConcurrent(deps.apiClient);
+  const { tenantKey, endUserKey } = resolveKeys(deps.userId, endUserId);
 
   const queryThreadId = new URL(req.url).searchParams.get("thread_id");
   const threadId = body.thread_id ?? queryThreadId ?? undefined;
   if (threadId && !ID_RE.test(threadId)) {
-    releaseSlots();
+    releaseReserved();
     return badRequest("BAD_REQUEST", "thread_id must match /^[A-Za-z0-9_-]{1,128}$/");
   }
 
   const hasProjectId = Boolean(body.project_id && body.project_id.trim() !== "");
   if (threadId && !hasProjectId) {
-    releaseSlots();
+    releaseReserved();
     return badRequest(
       "BAD_REQUEST",
       "project_id is required when thread_id is provided",
@@ -213,29 +180,12 @@ export async function handleStartAgentJob(
       prompt: body.prompt,
     });
   } catch (err) {
-    releaseSlots();
+    releaseReserved();
     return badRequest(
       "PROJECT_CREATE_FAILED",
       err instanceof Error ? err.message : String(err),
     );
   }
-
-  // At most one in-flight edit per project — two concurrent edits on the same
-  // project would each load it in a separate tab and race on the save.
-  const projectSlot = await acquireAll([{ key: `project:${projectId}`, max: 1 }]);
-  if (!projectSlot) {
-    releaseSlots();
-    recordConcurrencyRejected();
-    log.warn("project_edit_in_progress", { projectId });
-    return concurrencyRejected(
-      "An edit is already running on this project. Wait for it to finish and retry.",
-    );
-  }
-  const releaseFairness = releaseSlots;
-  releaseSlots = async () => {
-    await releaseFairness();
-    await projectSlot.release();
-  };
 
   let resolvedThreadId: string;
   if (threadId) {
@@ -244,7 +194,7 @@ export async function handleStartAgentJob(
     try {
       resolvedThreadId = await deps.apiClient.createAgentThread(projectId);
     } catch (err) {
-      releaseSlots();
+      releaseReserved();
       return badRequest(
         "THREAD_CREATE_FAILED",
         err instanceof Error ? err.message : String(err),
@@ -278,32 +228,62 @@ export async function handleStartAgentJob(
     });
 
     const abort = registerJobAbort(job.job_id);
-    void runQueued(async () =>
-      runAgentJob({
-        jobId: job.job_id,
-        apiKey: deps.apiKey,
-        apiKeyId: deps.apiKeyId,
-        projectId,
-        prompt: body.prompt,
-        attachments,
-        threadId: resolvedThreadId,
+
+    // Wait for a run slot (plan cap + one-edit-per-project), run, then release.
+    // Fire-and-forget: the endpoint returns 202 with the job_id now, and the
+    // caller polls GET /v1/agent/jobs/:id until the job reaches a terminal state.
+    const runReqs = [
+      { key: tenantKey, max: maxConcurrent },
+      { key: `project:${projectId}`, max: 1 },
+    ];
+    if (endUserKey !== tenantKey) {
+      runReqs.push({ key: endUserKey, max: MAX_CONCURRENT_PER_END_USER });
+    }
+    void (async () => {
+      const slots = await acquireAllOrWait(runReqs, {
         signal: abort.signal,
-      }),
-    )
-      .catch(async (err) => {
-        log.error("rest_agent_enqueue_failed", { jobId: job.job_id, err });
+        timeoutMs: SLOT_WAIT_TIMEOUT_MS,
+      });
+      if (!slots) {
+        if (!abort.signal.aborted) {
+          await updateJob(job.job_id, {
+            status: JobStatus.Failed,
+            error: "No editor slot became available in time.",
+            result: { reason: "slot_wait_timeout" },
+          }).catch(() => {});
+        }
+        unregisterJobAbort(job.job_id);
+        releaseReserved();
+        return;
+      }
+      try {
+        await runQueued(() =>
+          runAgentJob({
+            jobId: job.job_id,
+            apiKey: deps.apiKey,
+            apiKeyId: deps.apiKeyId,
+            projectId,
+            prompt: body.prompt,
+            attachments,
+            threadId: resolvedThreadId,
+            signal: abort.signal,
+          }),
+        );
+      } catch (err) {
+        log.error("rest_agent_run_failed", { jobId: job.job_id, err });
         await updateJob(job.job_id, {
           status: JobStatus.Failed,
           error: err instanceof Error ? err.message : String(err),
           result: { reason: "enqueue_failed" },
         }).catch(() => {});
-      })
-      .finally(() => {
+      } finally {
+        await slots.release();
         unregisterJobAbort(job.job_id);
-        return releaseSlots();
-      });
+        releaseReserved();
+      }
+    })();
   } catch (err) {
-    releaseSlots();
+    releaseReserved();
     return json(500, {
       error: {
         code: "JOB_CREATE_FAILED",

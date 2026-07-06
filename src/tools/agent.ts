@@ -1,26 +1,26 @@
 import { McpServer } from "@modelcontextprotocol/sdk/server/mcp.js";
 import { z } from "zod";
 import type { ApiClient } from "@/api/client";
-import { config, projectUrl } from "@/config";
-import { isQueueFull, runQueued } from "@/queue";
+import { projectUrl } from "@/config";
+import { runQueued, tryReserveTask, releaseTask } from "@/queue";
 import { fail, formatError, outputAny, truncate } from "@/response";
 import { runAgentJob } from "@/agent-runner";
 import { createJob, getJob, updateJob } from "@/jobs/index";
-import { registerJobAbort, unregisterJobAbort, abortJob } from "@/jobs/cancellation";
+import { registerJobAbort, unregisterJobAbort } from "@/jobs/cancellation";
 import { cancelAgentJob } from "@/agent-cancel";
 import type { Job } from "@/types/jobs.types";
 import { JobKind, JobStatus } from "@/types/jobs.types";
 import { BridgeInterruptType } from "@/types/bridge.types";
 import { validateExternalUrl } from "@/utils/url-guard";
 import {
-  acquireAll,
+  acquireAllOrWait,
   resolveKeys,
   MAX_CONCURRENT_PER_END_USER,
+  SLOT_WAIT_TIMEOUT_MS,
 } from "@/concurrency-limits";
 import { resolveMcpMaxConcurrent } from "@/plan";
-import { recordConcurrencyRejected, recordQueueFullRejected } from "@/metrics";
+import { recordQueueFullRejected } from "@/metrics";
 import { log } from "@/logger";
-import { progressFromExtra } from "@/mcp/progress";
 import type { BridgeAttachment } from "@/types/bridge.types";
 
 const ID_RE = /^[A-Za-z0-9_-]{1,128}$/;
@@ -45,8 +45,8 @@ function jobThreadId(job: Job): string | null {
   return job.thread_id ?? (jobResult(job).thread_id as string | undefined) ?? null;
 }
 
-// Response for a job that hasn't finished yet — returned when the synchronous
-// window expires and by check_edit while the run is still going.
+// Response for a job that hasn't finished yet — returned by edit_video on start
+// and by check_edit while the run is still going.
 function formatInProgress(job: Job) {
   const url = projectUrl(job.project_id);
   const threadId = jobThreadId(job);
@@ -60,9 +60,9 @@ function formatInProgress(job: Job) {
       {
         type: "text" as const,
         text:
-          "⏳ The edit is running in the background — this is normal for bigger edits.\n\n" +
+          "⏳ The edit is running in the background — this is expected, most edits take a few minutes.\n\n" +
           progressBlock +
-          `Call \`check_edit\` with job_id \`${job.job_id}\` in ~20 seconds to get the result.\n\n` +
+          `Keep polling: call \`check_edit\` with job_id \`${job.job_id}\` again in ~20 seconds. Repeat until it returns a terminal status (completed, failed, or cancelled) — don't stop after one or two checks, and don't tell the user it's done until check_edit confirms it.\n\n` +
           `Open project: ${url}`,
       },
       projectLink(url),
@@ -274,7 +274,7 @@ export function registerAgentTools(server: McpServer, deps: AgentToolDeps) {
       title: "Edit video",
       description:
         "Create or edit a video through text, using the user's own footage or letting Rendley supply it. Use it for any video creation or editing task. " +
-        "Fast edits return the result directly; longer edits return status \"in_progress\" with a job_id — call check_edit with it to get the result.",
+        'Returns immediately with status "in_progress" and a job_id; the edit runs in the background and usually takes a few minutes. You MUST then poll check_edit with that job_id every ~20s until it reports a terminal status (completed / failed / cancelled) — keep polling until then, do not stop after one or two checks, and do not tell the user it is done until check_edit confirms it. For multiple videos, call this once per video (they run concurrently up to the plan limit, extras queue automatically) and poll each job_id.',
       inputSchema: {
         project_id: z.string().regex(ID_RE).describe("Project to work on"),
         message: z
@@ -341,51 +341,39 @@ export function registerAgentTools(server: McpServer, deps: AgentToolDeps) {
         openWorldHint: true,
       },
     },
-    async (
-      { project_id, message, files, thread_id, continue_conversation, end_user_id },
-      extra,
-    ) => {
+    async ({
+      project_id,
+      message,
+      files,
+      thread_id,
+      continue_conversation,
+      end_user_id,
+    }) => {
       const logger = log.child({
         projectId: project_id,
         tool: "edit_video",
       });
 
-      if (isQueueFull()) {
+      // The only hard rejection is the global pending cap; the plan's per-tenant
+      // cap makes a request wait for a run slot (below), it doesn't turn it away.
+      if (!tryReserveTask()) {
         recordQueueFullRejected();
-        logger.warn("queue_full_edit_video_rejected");
+        logger.warn("pending_cap_reached_edit_video_rejected");
         return fail(
-          "The video editor is at capacity right now. Please retry in a few seconds.",
+          "The video editor has a lot of edits queued right now. Please retry in a few seconds.",
         );
       }
+      let reserved = true;
+      const releaseReserved = () => {
+        if (reserved) {
+          reserved = false;
+          releaseTask();
+        }
+      };
 
-      // Fairness gate: the backend owns the plan's concurrent-edit cap
-      // (GET /agent/limits); we only count in-flight edits against it, so one
-      // user can't occupy every browser. The queue caps the global total.
       const maxConcurrent = await resolveMcpMaxConcurrent(apiClient);
       const { tenantKey, endUserKey } = resolveKeys(userId, end_user_id);
-      const reqs = [
-        { key: tenantKey, max: maxConcurrent },
-        // At most one in-flight edit per project — two concurrent edits on the
-        // same project would each load it in a separate tab and race on the save.
-        { key: `project:${project_id}`, max: 1 },
-      ];
-      if (endUserKey !== tenantKey) {
-        reqs.push({ key: endUserKey, max: MAX_CONCURRENT_PER_END_USER });
-      }
-      const acquired = await acquireAll(reqs);
-      if (!acquired) {
-        recordConcurrencyRejected();
-        logger.warn("concurrency_limit_exceeded");
-        return fail(
-          "You have too many edits running right now. Please wait for one to finish and retry.",
-        );
-      }
-      const releaseSlots = () => acquired.release();
 
-      // Slots are released by the background run's finally once it launches;
-      // before that, error paths release here.
-      let backgroundLaunched = false;
-      let heartbeat: ReturnType<typeof setInterval> | undefined;
       try {
         let resolvedThreadId: string | null = thread_id ?? null;
         if (!resolvedThreadId && continue_conversation) {
@@ -422,89 +410,71 @@ export function registerAgentTools(server: McpServer, deps: AgentToolDeps) {
           files: remoteAttachments.length,
         });
 
-        // Forward live progress to the MCP client only while the synchronous
-        // window is open; the runner keeps persisting it on the job either way.
-        const mcpProgress = progressFromExtra(extra);
-        let windowOpen = true;
-
-        // During quiet stretches the runner emits nothing; send a progress ping
-        // anyway so the client/proxy never sees a silent connection and times out.
-        let lastProgressSentAt = Date.now();
-        const sendProgress = async (msg: string) => {
-          lastProgressSentAt = Date.now();
-          await mcpProgress(msg);
-        };
-        heartbeat = setInterval(() => {
-          if (!windowOpen) return;
-          if (Date.now() - lastProgressSentAt >= config.heartbeatMs) {
-            void sendProgress("Still working…");
-          }
-        }, config.heartbeatMs);
-        heartbeat.unref?.();
-
         const abort = registerJobAbort(job.job_id);
-        const runPromise = runQueued(() =>
-          runAgentJob({
-            jobId: job.job_id,
-            apiKey,
-            apiKeyId,
-            projectId: project_id,
-            prompt: message,
-            attachments: remoteAttachments,
-            threadId: resolvedThreadId,
+
+        // The plan's concurrent-run cap and the one-edit-per-project lock are
+        // enforced here, per run: two concurrent edits on the same project would
+        // each load it in a separate tab and race on the save.
+        const runReqs = [
+          { key: tenantKey, max: maxConcurrent },
+          { key: `project:${project_id}`, max: 1 },
+        ];
+        if (endUserKey !== tenantKey) {
+          runReqs.push({ key: endUserKey, max: MAX_CONCURRENT_PER_END_USER });
+        }
+
+        // Fire-and-forget: wait for a run slot (so a batch queues instead of being
+        // rejected), run, then release everything. The tool returns the job_id now
+        // and the client polls check_edit until the job reaches a terminal state.
+        void (async () => {
+          const slots = await acquireAllOrWait(runReqs, {
             signal: abort.signal,
-            onProgress: (msg) => {
-              if (windowOpen) return sendProgress(msg);
-            },
-          }),
-        )
-          .catch(async (err) => {
+            timeoutMs: SLOT_WAIT_TIMEOUT_MS,
+          });
+          if (!slots) {
+            // Aborted → the cancel path already set the terminal status. Timed out
+            // waiting → record it so the poller gets a definite answer.
+            if (!abort.signal.aborted) {
+              await updateJob(job.job_id, {
+                status: JobStatus.Failed,
+                error: "No editor slot became available in time.",
+                result: { reason: "slot_wait_timeout" },
+              }).catch(() => null);
+            }
+            unregisterJobAbort(job.job_id);
+            releaseReserved();
+            return;
+          }
+          try {
+            await runQueued(() =>
+              runAgentJob({
+                jobId: job.job_id,
+                apiKey,
+                apiKeyId,
+                projectId: project_id,
+                prompt: message,
+                attachments: remoteAttachments,
+                threadId: resolvedThreadId,
+                signal: abort.signal,
+              }),
+            );
+          } catch (err) {
             logger.error("agent_job_run_failed", { jobId: job.job_id, err });
-            return await updateJob(job.job_id, {
+            await updateJob(job.job_id, {
               status: JobStatus.Failed,
               error: err instanceof Error ? err.message : String(err),
               result: { reason: "enqueue_failed" },
             }).catch(() => null);
-          })
-          .finally(() => {
+          } finally {
+            await slots.release();
             unregisterJobAbort(job.job_id);
-            return releaseSlots();
-          });
-        backgroundLaunched = true;
-
-        // A client cancel ("stop") aborts the run only while the synchronous
-        // window is open; detached in the finally so a completed request can't
-        // kill a job that legitimately continues in the background.
-        const onClientCancel = () => abortJob(job.job_id);
-        let windowTimer: ReturnType<typeof setTimeout> | undefined;
-        try {
-          extra?.signal?.addEventListener("abort", onClientCancel, { once: true });
-
-          // Fast edits get a one-shot synchronous answer; longer ones are handed
-          // back as a job_id for check_edit polling once the window expires.
-          const raced = await Promise.race([
-            runPromise.then((finished) => ({ done: true as const, finished })),
-            new Promise<{ done: false }>((resolve) => {
-              windowTimer = setTimeout(() => resolve({ done: false }), config.syncWindowMs);
-              windowTimer.unref?.();
-            }),
-          ]);
-
-          if (raced.done && raced.finished) {
-            return formatJobResult(raced.finished);
+            releaseReserved();
           }
+        })();
 
-          const current = await getJob(job.job_id).catch(() => null);
-          return formatInProgress(current ?? job);
-        } finally {
-          clearTimeout(windowTimer);
-          clearInterval(heartbeat);
-          extra?.signal?.removeEventListener("abort", onClientCancel);
-          windowOpen = false;
-        }
+        return formatInProgress(job);
       } catch (err) {
-        if (heartbeat) clearInterval(heartbeat);
-        if (!backgroundLaunched) releaseSlots();
+        releaseReserved();
         logger.error("send_failed", { err });
         return fail(`Agent message failed: ${formatError(err)}`);
       }
@@ -516,7 +486,7 @@ export function registerAgentTools(server: McpServer, deps: AgentToolDeps) {
     {
       title: "Check edit status",
       description:
-        "Check on a video edit that edit_video handed back as in_progress. Pass the job_id it returned; when the edit finishes this returns the same result edit_video would have.",
+        "Poll the status of a video edit started by edit_video. Pass the job_id it returned. While the edit is still running this reports in_progress with recent progress — keep calling it every ~20s until it returns a terminal status (completed / failed / cancelled); only then is the edit actually done. When finished it returns the same result edit_video would have.",
       inputSchema: {
         job_id: z
           .string()

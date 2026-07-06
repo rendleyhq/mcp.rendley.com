@@ -12,6 +12,10 @@
 // Fair sharing within one tenant when it attributes requests to end users.
 export const MAX_CONCURRENT_PER_END_USER = 3;
 
+// How long a queued edit waits for a run slot before it's marked failed. Runs
+// are internally bounded, so slots always free eventually; this is the backstop.
+export const SLOT_WAIT_TIMEOUT_MS = 30 * 60 * 1000;
+
 export interface SlotRequest {
   key: string;
   max: number;
@@ -51,6 +55,24 @@ export async function acquireAll(reqs: SlotRequest[]): Promise<Acquisition | nul
       acquired.forEach(releaseKey);
     },
   };
+}
+
+// Like acquireAll, but when a key is at capacity it waits and retries until the
+// slot frees, the signal aborts, or the deadline passes (returns null on the
+// latter two). Lets a queued edit wait for a run slot instead of being rejected.
+export async function acquireAllOrWait(
+  reqs: SlotRequest[],
+  opts: { signal?: AbortSignal; timeoutMs: number; pollMs?: number },
+): Promise<Acquisition | null> {
+  const deadline = Date.now() + opts.timeoutMs;
+  const pollMs = opts.pollMs ?? 500;
+  for (;;) {
+    if (opts.signal?.aborted) return null;
+    const acquired = await acquireAll(reqs);
+    if (acquired) return acquired;
+    if (Date.now() >= deadline) return null;
+    await new Promise((resolve) => setTimeout(resolve, pollMs));
+  }
 }
 
 export interface ConcurrencyKeys {
