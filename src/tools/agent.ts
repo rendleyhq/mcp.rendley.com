@@ -6,11 +6,17 @@ import { isQueueFull, runQueued } from "@/queue";
 import { fail, formatError, outputAny, truncate } from "@/response";
 import { runAgentJob } from "@/agent-runner";
 import { createJob, getJob, updateJob } from "@/jobs/index";
+import { registerJobAbort, unregisterJobAbort, abortJob } from "@/jobs/cancellation";
+import { cancelAgentJob } from "@/agent-cancel";
 import type { Job } from "@/types/jobs.types";
 import { JobStatus } from "@/types/jobs.types";
-import { acquireAll, releaseAll, resolveKeys } from "@/concurrency-limits";
-import { resolvePlanCap } from "@/plan-cache";
 import { validateExternalUrl } from "@/utils/url-guard";
+import {
+  acquireAll,
+  resolveKeys,
+  MAX_CONCURRENT_PER_END_USER,
+} from "@/concurrency-limits";
+import { resolveMcpMaxConcurrent } from "@/plan-cache";
 import { recordConcurrencyRejected, recordQueueFullRejected } from "@/metrics";
 import { log } from "@/logger";
 import { progressFromExtra } from "@/mcp/progress";
@@ -121,6 +127,24 @@ function formatJobResult(job: Job) {
         ...structuredContent,
         status: "completed",
         command_executions: cmdCount,
+      },
+    };
+  }
+
+  if (job.status === JobStatus.Cancelled) {
+    return {
+      content: [
+        {
+          type: "text" as const,
+          text:
+            "🛑 This edit was cancelled. Any edits applied before the cancel were saved.\n\n" +
+            `Open project: ${url}`,
+        },
+        projectLink(url),
+      ],
+      structuredContent: {
+        ...structuredContent,
+        status: "cancelled",
       },
     };
   }
@@ -333,25 +357,29 @@ export function registerAgentTools(server: McpServer, deps: AgentToolDeps) {
         );
       }
 
-      const planCap = await resolvePlanCap(userId, apiClient);
+      // Fairness gate: the backend owns the plan's concurrent-edit cap
+      // (GET /agent/limits); we only count in-flight edits against it, so one
+      // user can't occupy every browser. The queue caps the global total.
+      const maxConcurrent = await resolveMcpMaxConcurrent(userId, apiClient);
       const { tenantKey, endUserKey } = resolveKeys(userId, end_user_id);
-      const reqs = [{ key: tenantKey, max: planCap }];
+      const reqs = [{ key: tenantKey, max: maxConcurrent }];
       if (endUserKey !== tenantKey) {
-        reqs.push({ key: endUserKey, max: config.maxConcurrentPerEndUser });
+        reqs.push({ key: endUserKey, max: MAX_CONCURRENT_PER_END_USER });
       }
-      const acquiredKeys = reqs.map((r) => r.key);
-      if (!acquireAll(reqs)) {
+      const acquired = await acquireAll(reqs);
+      if (!acquired) {
         recordConcurrencyRejected();
         logger.warn("concurrency_limit_exceeded");
         return fail(
           "You have too many edits running right now. Please wait for one to finish and retry.",
         );
       }
-      const releaseSlots = () => releaseAll(acquiredKeys);
+      const releaseSlots = () => acquired.release();
 
       // Slots are released by the background run's finally once it launches;
       // before that, error paths release here.
       let backgroundLaunched = false;
+      let heartbeat: ReturnType<typeof setInterval> | undefined;
       try {
         let resolvedThreadId: string | null = thread_id ?? null;
         if (!resolvedThreadId && continue_conversation) {
@@ -393,6 +421,24 @@ export function registerAgentTools(server: McpServer, deps: AgentToolDeps) {
         const mcpProgress = progressFromExtra(extra);
         let windowOpen = true;
 
+        // Heartbeat: during quiet stretches (long model turn, long generation
+        // step) the runner emits nothing — send a progress notification anyway
+        // so the client/proxy never sees a silent connection and times out.
+        const HEARTBEAT_MS = 25_000;
+        let lastProgressSentAt = Date.now();
+        const sendProgress = async (msg: string) => {
+          lastProgressSentAt = Date.now();
+          await mcpProgress(msg);
+        };
+        heartbeat = setInterval(() => {
+          if (!windowOpen) return;
+          if (Date.now() - lastProgressSentAt >= HEARTBEAT_MS) {
+            void sendProgress("Still working…");
+          }
+        }, HEARTBEAT_MS);
+        heartbeat.unref?.();
+
+        const abort = registerJobAbort(job.job_id);
         const runPromise = runQueued(() =>
           runAgentJob({
             jobId: job.job_id,
@@ -402,8 +448,9 @@ export function registerAgentTools(server: McpServer, deps: AgentToolDeps) {
             prompt: message,
             attachments: remoteAttachments,
             threadId: resolvedThreadId,
+            signal: abort.signal,
             onProgress: (msg) => {
-              if (windowOpen) return mcpProgress(msg);
+              if (windowOpen) return sendProgress(msg);
             },
           }),
         )
@@ -415,8 +462,17 @@ export function registerAgentTools(server: McpServer, deps: AgentToolDeps) {
               result: { reason: "enqueue_failed" },
             }).catch(() => null);
           })
-          .finally(releaseSlots);
+          .finally(() => {
+            unregisterJobAbort(job.job_id);
+            return releaseSlots();
+          });
         backgroundLaunched = true;
+
+        // While the synchronous window is open, a client cancel (Claude/ChatGPT
+        // "stop") aborts the run. Detached after handoff so a completed request
+        // can't kill a job that legitimately continues in the background.
+        const onClientCancel = () => abortJob(job.job_id);
+        extra?.signal?.addEventListener("abort", onClientCancel, { once: true });
 
         // Hybrid contract: give fast edits a one-shot synchronous answer, and
         // hand longer ones back as a job_id for check_edit polling instead of
@@ -429,6 +485,8 @@ export function registerAgentTools(server: McpServer, deps: AgentToolDeps) {
           }),
         ]);
         if (windowTimer) clearTimeout(windowTimer);
+        clearInterval(heartbeat);
+        extra?.signal?.removeEventListener("abort", onClientCancel);
         windowOpen = false;
 
         if (raced.done && raced.finished) {
@@ -438,6 +496,7 @@ export function registerAgentTools(server: McpServer, deps: AgentToolDeps) {
         const current = await getJob(job.job_id).catch(() => null);
         return formatInProgress(current ?? job);
       } catch (err) {
+        if (heartbeat) clearInterval(heartbeat);
         if (!backgroundLaunched) releaseSlots();
         logger.error("send_failed", { err });
         return fail(`Agent message failed: ${formatError(err)}`);
@@ -477,6 +536,52 @@ export function registerAgentTools(server: McpServer, deps: AgentToolDeps) {
       }
 
       return formatJobResult(job);
+    },
+  );
+
+  server.registerTool(
+    "cancel_edit",
+    {
+      title: "Cancel edit",
+      description:
+        "Stop a running video edit that edit_video handed back as in_progress. Pass the job_id it returned; the edit halts and no further work runs.",
+      inputSchema: {
+        job_id: z
+          .string()
+          .uuid()
+          .describe("The job_id returned by edit_video."),
+      },
+      outputSchema: outputAny,
+      annotations: {
+        readOnlyHint: false,
+        openWorldHint: true,
+      },
+    },
+    async ({ job_id }) => {
+      const outcome = await cancelAgentJob(job_id, apiKeyId);
+      if (outcome.status === "not_found") {
+        return fail(
+          "No edit job found with this id — it may have expired (results are kept for about 24 hours).",
+        );
+      }
+      if (outcome.status === "already_done") {
+        return formatJobResult(outcome.job);
+      }
+      return {
+        content: [
+          {
+            type: "text" as const,
+            text: "🛑 Edit cancelled. No further work will run for this job.",
+          },
+        ],
+        structuredContent: {
+          project_id: outcome.job.project_id,
+          project_url: projectUrl(outcome.job.project_id),
+          ...(outcome.job.thread_id ? { thread_id: outcome.job.thread_id } : {}),
+          status: "cancelled",
+          job_id: outcome.job.job_id,
+        },
+      };
     },
   );
 }

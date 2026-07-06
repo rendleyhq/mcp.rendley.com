@@ -19,9 +19,6 @@ const concurrencyRejectedCounter = meter.createCounter(
 const queueFullRejectedCounter = meter.createCounter("mcp.queue.full_rejected", {
   description: "Requests rejected because the queue hit its DoS ceiling.",
 });
-const rateLimitedCounter = meter.createCounter("mcp.rate_limited", {
-  description: "Requests rejected by the per-API-key rate limiter.",
-});
 const planDowngradeCounter = meter.createCounter("mcp.plan_cap.downgraded", {
   description: "Plan-cap resolutions that fell back to the free tier on API error.",
 });
@@ -31,9 +28,6 @@ export function recordConcurrencyRejected(): void {
 }
 export function recordQueueFullRejected(): void {
   queueFullRejectedCounter.add(1);
-}
-export function recordRateLimited(): void {
-  rateLimitedCounter.add(1);
 }
 export function recordPlanDowngrade(): void {
   planDowngradeCounter.add(1);

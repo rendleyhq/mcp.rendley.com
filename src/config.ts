@@ -27,15 +27,16 @@ const intSchema = (fallback: number, min = 1) =>
 const constants = {
   exportPollTimeoutMs: 25 * 60 * 1000,
   exportPollIntervalMs: 3000,
-  planConcurrency: {
-    starter: 3,
-    pro: 5,
-    business: 10,
-    free: 1,
-  },
-  maxConcurrentPerEndUser: 3,
   maxBrowserBusyRetries: 2,
   diskCacheBytes: 2 * 1024 * 1024 * 1024,
+  // Transient worker connect/pre-stream failures (fetch error, 5xx, stall before
+  // any progress) are safe to re-dispatch since no edit has started yet.
+  maxWorkerConnectRetries: 2,
+  // Minimum spacing between browser-worker launch attempts. Cloudflare admits
+  // ~1 new browser per second account-wide; an unpaced burst just converts
+  // into BROWSER_BUSY failures once the retry budget runs out. Per-replica —
+  // raise proportionally if the MCP ever runs more than one replica.
+  browserLaunchIntervalMs: 1000,
 } as const;
 
 // Defaults for the env-overridable tuning knobs below.
@@ -74,8 +75,6 @@ const EnvSchema = z.object({
   OPENAI_APPS_CHALLENGE_TOKEN: z.string().default(""),
   BROWSER_WORKER_URL: z.string().url().optional(),
   BROWSER_WORKER_TOKEN: z.string().default(""),
-  // Durable job store. Unset → in-memory (jobs lost on restart; dev only).
-  REDIS_URL: z.string().optional(),
   BROWSER_MODE: z.preprocess(
     (value) =>
       value === undefined || value === ""
@@ -93,10 +92,9 @@ const EnvSchema = z.object({
   // steps), so the window is generous by default — progress notifications keep
   // MCP clients alive during it. The run itself continues up to agentTimeoutMs.
   SYNC_WINDOW_MS: intSchema(3 * 60 * 1000),
-  // How long the browser worker holds a finished session warm for follow-up
-  // edits on the same thread. Held browsers bill while idle, so keep this
-  // short. 0 disables sending reuse hints entirely.
-  SESSION_HOLD_MS: intSchema(60 * 1000, 0),
+  // Abort a worker run if no stream event (progress, result, or ping heartbeat)
+  // arrives within this window, instead of waiting out the full run deadline.
+  WORKER_STALL_TIMEOUT_MS: intSchema(60 * 1000),
   CHROMIUM_JS_HEAP_MB: intSchema(defaults.chromiumJsHeapMb),
   HEADLESS: boolSchema(defaults.headless),
   USE_CHROME_CHANNEL: boolSchema(defaults.useChromeChannel),
@@ -106,8 +104,6 @@ const EnvSchema = z.object({
   // Every run then leaks a browser, so only use it while debugging locally.
   KEEP_BROWSER_OPEN: boolSchema(false),
 
-  RATE_LIMIT_WINDOW_MS: intSchema(60_000),
-  RATE_LIMIT_MAX: intSchema(240, 0),
 });
 
 const env = EnvSchema.parse(process.env);
@@ -130,16 +126,12 @@ export const config = {
   browserRecycleAfter: env.BROWSER_RECYCLE_AFTER,
   agentTimeoutMs: env.AGENT_TIMEOUT_MS,
   syncWindowMs: env.SYNC_WINDOW_MS,
-  sessionHoldMs: env.SESSION_HOLD_MS,
+  workerStallTimeoutMs: env.WORKER_STALL_TIMEOUT_MS,
   chromiumJsHeapMb: env.CHROMIUM_JS_HEAP_MB,
   headless: env.HEADLESS,
   useChromeChannel: env.USE_CHROME_CHANNEL,
   cpuOnly: env.CPU_ONLY,
   keepBrowserOpen: env.KEEP_BROWSER_OPEN,
-  rateLimit: {
-    windowMs: env.RATE_LIMIT_WINDOW_MS,
-    max: env.RATE_LIMIT_MAX,
-  },
   corsOrigins: env.CORS_ORIGINS,
   authBaseUrl,
   authIssuer: new URL(authBaseUrl).origin,
@@ -156,7 +148,6 @@ export const config = {
     : "",
   browserWorkerToken: env.BROWSER_WORKER_TOKEN.trim(),
   browserMode: env.BROWSER_MODE,
-  redisUrl: env.REDIS_URL?.trim() ?? "",
 };
 
 export const PROTECTED_RESOURCE_METADATA_PATH =

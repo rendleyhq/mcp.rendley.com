@@ -7,6 +7,10 @@ export class RemoteBrowserError extends Error {
   constructor(
     public code: string,
     message: string,
+    // Safe to re-dispatch only when no edit has started yet (connect failure,
+    // 5xx, or a stall before any progress). Mid-run failures must not retry —
+    // the worker may have partially applied the edit.
+    public retryable = false,
   ) {
     super(message);
     this.name = "RemoteBrowserError";
@@ -26,12 +30,7 @@ export class BrowserBusyError extends RemoteBrowserError {
 type WorkerEvent =
   | { type: "progress"; message: string }
   | { type: "ping" }
-  | {
-      type: "result";
-      outcome: PollOutcome;
-      // Session-reuse observability from newer worker builds.
-      meta?: { reusedSession?: boolean; held?: boolean; sessionRunCount?: number };
-    }
+  | { type: "result"; outcome: PollOutcome }
   | { type: "error"; code: string; message: string; retryAfterSeconds?: number };
 
 const sleep = (ms: number, signal?: AbortSignal): Promise<void> =>
@@ -51,6 +50,19 @@ const sleep = (ms: number, signal?: AbortSignal): Promise<void> =>
     };
     signal?.addEventListener("abort", onAbort, { once: true });
   });
+
+// Launch pacer: space launch attempts to Cloudflare's account-wide admission
+// rate so a burst of simultaneous edits queues here (bounded by each run's
+// overall deadline) instead of failing with BROWSER_BUSY.
+let nextLaunchAt = 0;
+async function paceLaunch(signal: AbortSignal): Promise<void> {
+  const interval = config.browserLaunchIntervalMs;
+  if (interval <= 0) return;
+  const now = Date.now();
+  const waitMs = Math.max(0, nextLaunchAt - now);
+  nextLaunchAt = Math.max(now, nextLaunchAt) + interval;
+  if (waitMs > 0) await sleep(waitMs, signal);
+}
 
 export class RemoteAgentBrowser extends AgentBrowser {
   async runAgent(
@@ -73,23 +85,42 @@ export class RemoteAgentBrowser extends AgentBrowser {
       ? AbortSignal.any([signal, deadline])
       : deadline;
 
-    let attempt = 0;
+    let busyAttempt = 0;
+    let connectAttempt = 0;
     for (;;) {
       try {
         return await this.runOnce(input, onProgress, combined);
       } catch (err) {
         if (
           err instanceof BrowserBusyError &&
-          attempt < config.maxBrowserBusyRetries &&
+          busyAttempt < config.maxBrowserBusyRetries &&
           !combined.aborted
         ) {
-          attempt += 1;
+          busyAttempt += 1;
           const waitSec = Math.min(err.retryAfterSeconds || 5, 15);
           log.warn("remote_agent_browser_busy_retry", {
-            attempt,
+            attempt: busyAttempt,
             waitSeconds: waitSec,
           });
           await sleep(waitSec * 1000, combined);
+          continue;
+        }
+        // Transient connect/pre-stream failures (worker cold start, 5xx,
+        // unreachable, stall before any progress) re-dispatch a fresh run.
+        if (
+          err instanceof RemoteBrowserError &&
+          err.retryable &&
+          connectAttempt < config.maxWorkerConnectRetries &&
+          !combined.aborted
+        ) {
+          connectAttempt += 1;
+          const waitMs = Math.min(1000 * 2 ** (connectAttempt - 1), 5000);
+          log.warn("remote_agent_worker_retry", {
+            attempt: connectAttempt,
+            code: err.code,
+            waitMs,
+          });
+          await sleep(waitMs, combined);
           continue;
         }
         throw err;
@@ -102,6 +133,22 @@ export class RemoteAgentBrowser extends AgentBrowser {
     onProgress: AgentProgress,
     signal: AbortSignal,
   ): Promise<PollOutcome> {
+    // Stall guard: if the worker stops streaming (progress/result/ping) for
+    // longer than the stall window, abort this read instead of hanging until the
+    // overall run deadline. Wired into the fetch signal so it tears the socket.
+    const stall = new AbortController();
+    const streamSignal = AbortSignal.any([signal, stall.signal]);
+    let stallTimer: ReturnType<typeof setTimeout> | undefined;
+    const armStall = () => {
+      if (stallTimer) clearTimeout(stallTimer);
+      stallTimer = setTimeout(() => stall.abort(), config.workerStallTimeoutMs);
+      stallTimer.unref?.();
+    };
+
+    // Every attempt (first dispatch and retries) launches a fresh browser on
+    // the worker, so every attempt pays the pacer.
+    await paceLaunch(signal);
+
     let res: Response;
     try {
       res = await fetch(`${config.browserWorkerUrl}/v1/agent-run`, {
@@ -113,7 +160,7 @@ export class RemoteAgentBrowser extends AgentBrowser {
             : {}),
         },
         body: JSON.stringify(input),
-        signal,
+        signal: streamSignal,
       });
     } catch (err) {
       if (signal.aborted) {
@@ -122,6 +169,7 @@ export class RemoteAgentBrowser extends AgentBrowser {
       throw new RemoteBrowserError(
         "WORKER_UNREACHABLE",
         `could not reach browser worker: ${err instanceof Error ? err.message : String(err)}`,
+        true,
       );
     }
 
@@ -132,7 +180,13 @@ export class RemoteAgentBrowser extends AgentBrowser {
         if (body.error?.message) detail = `${body.error.code ?? res.status}: ${body.error.message}`;
       } catch {
       }
-      throw new RemoteBrowserError("WORKER_HTTP_ERROR", `browser worker error ${detail}`);
+      // 5xx is a transient worker fault (cold start, deploy) — safe to retry
+      // since no run has started; 4xx is our request's fault and won't improve.
+      throw new RemoteBrowserError(
+        "WORKER_HTTP_ERROR",
+        `browser worker error ${detail}`,
+        res.status >= 500,
+      );
     }
 
     if (!res.body) {
@@ -143,6 +197,9 @@ export class RemoteAgentBrowser extends AgentBrowser {
     const decoder = new TextDecoder();
     let buffer = "";
     let outcome: PollOutcome | null = null;
+    // Once the worker emits progress or a result, an edit is in flight — a later
+    // stall must not re-dispatch (it would double-apply).
+    let sawWork = false;
 
     const handleLine = async (line: string): Promise<void> => {
       const trimmed = line.trim();
@@ -156,18 +213,14 @@ export class RemoteAgentBrowser extends AgentBrowser {
       }
       switch (evt.type) {
         case "progress":
+          sawWork = true;
           await onProgress(evt.message);
           break;
         case "ping":
           break;
         case "result":
+          sawWork = true;
           outcome = evt.outcome;
-          if (evt.meta) {
-            log.info("remote_agent_session_meta", {
-              projectId: input.projectId,
-              ...evt.meta,
-            });
-          }
           break;
         case "error":
           if (evt.code === "BROWSER_BUSY") {
@@ -177,10 +230,12 @@ export class RemoteAgentBrowser extends AgentBrowser {
       }
     };
 
+    armStall();
     try {
       while (true) {
         const { value, done } = await reader.read();
         if (done) break;
+        armStall(); // any bytes prove the worker is alive
         buffer += decoder.decode(value, { stream: true });
         let idx: number;
         while ((idx = buffer.indexOf("\n")) >= 0) {
@@ -195,8 +250,16 @@ export class RemoteAgentBrowser extends AgentBrowser {
       if (signal.aborted) {
         throw this.abortError(signal);
       }
+      if (stall.signal.aborted) {
+        throw new RemoteBrowserError(
+          "WORKER_STALL",
+          `browser worker sent no events for ${config.workerStallTimeoutMs}ms`,
+          !sawWork,
+        );
+      }
       throw err;
     } finally {
+      if (stallTimer) clearTimeout(stallTimer);
       // cancel() tears down the socket; releaseLock alone leaves the connection open.
       await reader.cancel().catch(() => {});
     }

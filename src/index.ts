@@ -8,7 +8,6 @@ import { WebStandardStreamableHTTPServerTransport } from "@modelcontextprotocol/
 import { config, PROTECTED_RESOURCE_METADATA_PATH } from "@/config";
 import { BrowserMode } from "@/constants";
 import { requireBearer, requirePaidPlan, type AppEnv } from "@/middlewares/auth";
-import { userRateLimit } from "@/rate-limit";
 import "@/metrics";
 import { registerProjectTools } from "@/tools/projects";
 import { registerAccountTools } from "@/tools/account";
@@ -19,7 +18,7 @@ import { registerUploadTools } from "@/tools/uploads";
 import { resolvePlanTier } from "@/plan-cache";
 import { fail } from "@/response";
 import { handleStartAgentJob } from "@/http/agent";
-import { handleGetJob } from "@/http/jobs";
+import { handleGetJob, handleCancelJob } from "@/http/jobs";
 import { handleUploadBrandAsset } from "@/http/brandkit";
 import { handleStreamUpload } from "@/http/uploads";
 import { MAX_UPLOAD_BYTES } from "@/http/upload-tokens";
@@ -130,9 +129,9 @@ if (config.openaiAppsChallengeToken) {
 // Free plans can connect and list tools, but each tool call returns an upgrade
 // prompt (paywall handled per-tool in handleMCPRequest) — softer than a hard
 // transport block, so the assistant can nudge the user to upgrade in-chat.
-app.all("/mcp", requireBearer, userRateLimit, (c) => handleMCPRequest(c));
+app.all("/mcp", requireBearer, (c) => handleMCPRequest(c));
 
-app.post("/v1/agent", requireBearer, requirePaidPlan, userRateLimit, (c) =>
+app.post("/v1/agent", requireBearer, requirePaidPlan, (c) =>
   handleStartAgentJob(c.req.raw, {
     apiClient: c.get("apiClient"),
     apiKey: c.get("apiKey"),
@@ -141,7 +140,7 @@ app.post("/v1/agent", requireBearer, requirePaidPlan, userRateLimit, (c) =>
   }),
 );
 
-app.post("/v1/brandkit/assets", requireBearer, requirePaidPlan, userRateLimit, (c) =>
+app.post("/v1/brandkit/assets", requireBearer, requirePaidPlan, (c) =>
   handleUploadBrandAsset(c.req.raw, { apiClient: c.get("apiClient") }),
 );
 
@@ -150,11 +149,14 @@ app.put("/v1/uploads/stream/:token", (c) =>
   handleStreamUpload(c.req.raw, c.req.param("token")),
 );
 
-app.get("/v1/jobs/:id", requireBearer, userRateLimit, (c) =>
+app.get("/v1/jobs/:id", requireBearer, (c) =>
   handleGetJob(c.req.param("id"), c.get("apiKeyId")),
 );
-app.get("/v1/agent/jobs/:id", requireBearer, userRateLimit, (c) =>
+app.get("/v1/agent/jobs/:id", requireBearer, (c) =>
   handleGetJob(c.req.param("id"), c.get("apiKeyId")),
+);
+app.post("/v1/agent/jobs/:id/cancel", requireBearer, (c) =>
+  handleCancelJob(c.req.param("id"), c.get("apiKeyId"), c.get("apiClient")),
 );
 
 function withMcpAccept(req: Request): Request {

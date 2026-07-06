@@ -7,10 +7,25 @@ export const JOB_TTL_MS = 60 * 60 * 1000;
 export const ORPHAN_MAX_AGE_MS = config.agentTimeoutMs + 600_000;
 
 export const isTerminal = (s: JobStatus) =>
-  s === JobStatus.Completed || s === JobStatus.Failed;
+  s === JobStatus.Completed || s === JobStatus.Failed || s === JobStatus.Cancelled;
+
+// Terminal jobs are evicted lazily on read, but a completed job that's never
+// polled again would linger — sweep the map periodically so it can't grow
+// unbounded on a long-lived process.
+const SWEEP_INTERVAL_MS = 5 * 60 * 1000;
 
 export function createMemoryJobStore(): JobStore {
   const jobs = new Map<string, Job>();
+
+  const sweep = () => {
+    const now = Date.now();
+    for (const [id, job] of jobs) {
+      if (isTerminal(job.status) && now - job.updated_at > JOB_TTL_MS) {
+        jobs.delete(id);
+      }
+    }
+  };
+  setInterval(sweep, SWEEP_INTERVAL_MS).unref?.();
 
   return {
     async create(input: CreateJobInput): Promise<Job> {
@@ -66,6 +81,14 @@ export function createMemoryJobStore(): JobStore {
       const updated: Job = { ...existing, ...patch, updated_at: Date.now() };
       jobs.set(id, updated);
       return updated;
+    },
+
+    async listNonTerminal(): Promise<Job[]> {
+      const out: Job[] = [];
+      for (const job of jobs.values()) {
+        if (!isTerminal(job.status)) out.push(job);
+      }
+      return out;
     },
   };
 }

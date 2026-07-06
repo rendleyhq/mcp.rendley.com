@@ -529,6 +529,12 @@ export class ApiClient {
     return thread.ID;
   }
 
+  // Plan-derived agent limits — the backend owns the values; the MCP reads
+  // them instead of holding its own copies.
+  async getAgentLimits(): Promise<{ mcp_agent_max_concurrent: number }> {
+    return this.get<{ mcp_agent_max_concurrent: number }>("/agent/limits");
+  }
+
   async getLastAgentThread(projectId: string): Promise<string | null> {
     const thread = await this.get<{ ID: string } | null>(
       `/agent/threads/last?project_id=${encodeURIComponent(projectId)}`,

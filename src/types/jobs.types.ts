@@ -3,6 +3,7 @@ export enum JobStatus {
   Running = "running",
   Completed = "completed",
   Failed = "failed",
+  Cancelled = "cancelled",
 }
 
 export type JobKind = "agent" | "export";
@@ -37,4 +38,7 @@ export interface JobStore {
   update(id: string, patch: Partial<Job>): Promise<Job | null>;
   // Insert/replace a full record under its existing id (write-through mirrors).
   insert(job: Job): Promise<void>;
+  // Non-terminal jobs known to this replica — used at shutdown to fail whatever
+  // is still running so pollers get a clean terminal answer instead of limbo.
+  listNonTerminal(): Promise<Job[]>;
 }

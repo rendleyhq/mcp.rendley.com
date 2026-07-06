@@ -1,15 +1,19 @@
 import { z } from "zod";
 import type { ApiClient } from "@/api/client";
-import { config } from "@/config";
 import { runAgentJob } from "@/agent-runner";
 import type { BridgeAttachment } from "@/types/bridge.types";
 import { createJob, jobToResponse, updateJob } from "@/jobs/index";
+import { registerJobAbort, unregisterJobAbort } from "@/jobs/cancellation";
 import { JobStatus } from "@/types/jobs.types";
 import { log } from "@/logger";
 import { getQueueStats, isQueueFull, runQueued } from "@/queue";
-import { acquireAll, releaseAll, resolveKeys } from "@/concurrency-limits";
-import { resolvePlanCap } from "@/plan-cache";
 import { validateExternalUrl, UrlGuardError } from "@/utils/url-guard";
+import {
+  acquireAll,
+  resolveKeys,
+  MAX_CONCURRENT_PER_END_USER,
+} from "@/concurrency-limits";
+import { resolveMcpMaxConcurrent } from "@/plan-cache";
 import { recordConcurrencyRejected, recordQueueFullRejected } from "@/metrics";
 
 interface Deps {
@@ -167,14 +171,17 @@ export async function handleStartAgentJob(
     );
   }
 
-  const planCap = await resolvePlanCap(deps.userId, deps.apiClient);
+  // Fairness gate: the backend owns the plan's concurrent-edit cap
+  // (GET /agent/limits); we only count in-flight edits against it, so one
+  // user can't occupy every browser. The queue caps the global total.
+  const maxConcurrent = await resolveMcpMaxConcurrent(deps.userId, deps.apiClient);
   const { tenantKey, endUserKey } = resolveKeys(deps.userId, endUserId);
-  const reqs = [{ key: tenantKey, max: planCap }];
+  const reqs = [{ key: tenantKey, max: maxConcurrent }];
   if (endUserKey !== tenantKey) {
-    reqs.push({ key: endUserKey, max: config.maxConcurrentPerEndUser });
+    reqs.push({ key: endUserKey, max: MAX_CONCURRENT_PER_END_USER });
   }
-  const acquiredKeys = reqs.map((r) => r.key);
-  if (!acquireAll(reqs)) {
+  const acquired = await acquireAll(reqs);
+  if (!acquired) {
     recordConcurrencyRejected();
     log.warn("concurrency_limit_exceeded", { endUserId });
     return concurrencyRejected(
@@ -182,7 +189,7 @@ export async function handleStartAgentJob(
     );
   }
 
-  const releaseSlots = () => releaseAll(acquiredKeys);
+  const releaseSlots = () => acquired.release();
 
   const queryThreadId = new URL(req.url).searchParams.get("thread_id");
   const threadId = body.thread_id ?? queryThreadId ?? undefined;
@@ -253,6 +260,7 @@ export async function handleStartAgentJob(
       };
     });
 
+    const abort = registerJobAbort(job.job_id);
     void runQueued(async () =>
       runAgentJob({
         jobId: job.job_id,
@@ -262,6 +270,7 @@ export async function handleStartAgentJob(
         prompt: body.prompt,
         attachments,
         threadId: resolvedThreadId,
+        signal: abort.signal,
       }),
     )
       .catch(async (err) => {
@@ -272,7 +281,10 @@ export async function handleStartAgentJob(
           result: { reason: "enqueue_failed" },
         }).catch(() => {});
       })
-      .finally(releaseSlots);
+      .finally(() => {
+        unregisterJobAbort(job.job_id);
+        return releaseSlots();
+      });
   } catch (err) {
     releaseSlots();
     return json(500, {

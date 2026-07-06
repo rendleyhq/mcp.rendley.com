@@ -1,5 +1,6 @@
 // Shutdown order must hold: stop HTTP, then drain in-flight jobs.
 import { jobQueue } from "@/queue";
+import { failInterruptedJobs } from "@/jobs/index";
 import { log } from "@/logger";
 
 interface ClosableServer {
@@ -48,6 +49,16 @@ async function gracefulShutdown(
       t.unref?.();
     }),
   ]);
+
+  // Anything still non-terminal after the drain window won't finish — mark it
+  // failed so pollers get a clean, retryable terminal state instead of a job
+  // stuck "running" until the orphan window (or a 404 with the in-memory store).
+  try {
+    const failed = await failInterruptedJobs();
+    if (failed > 0) log.warn("shutdown_failed_interrupted_jobs", { count: failed });
+  } catch (err) {
+    log.error("shutdown_fail_jobs_error", { err });
+  }
 
   log.info("shutdown_complete");
 }

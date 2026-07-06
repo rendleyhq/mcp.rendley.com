@@ -1,4 +1,3 @@
-import { createHash } from "crypto";
 import { ApiClient } from "@/api/client";
 import { config, headlessProjectUrl } from "@/config";
 import { getAgentBrowser } from "@/sdk/browser-factory";
@@ -12,16 +11,6 @@ import { JobStatus } from "@/types/jobs.types";
 // Keep only the most recent progress lines on the job record.
 const PROGRESS_RING_SIZE = 20;
 
-// Stable warm-session key: same tenant + project + thread reuses the held
-// browser on the worker; anything else is a miss. Hashed so no identifiers
-// leak into worker logs.
-function sessionKeyFor(apiKeyId: string, projectId: string, threadId: string): string {
-  return createHash("sha256")
-    .update(`${apiKeyId}:${projectId}:${threadId}`)
-    .digest("hex")
-    .slice(0, 32);
-}
-
 interface RunInput {
   jobId: string;
   apiKey: string;
@@ -34,6 +23,8 @@ interface RunInput {
   // Live progress forwarding (e.g. MCP progress notifications during the
   // synchronous window). Progress is always persisted on the job regardless.
   onProgress?: (message: string) => void | Promise<void>;
+  // Aborts the browser-worker run (user cancel / explicit cancel endpoint).
+  signal?: AbortSignal;
 }
 
 // Runs the browser-mediated agent edit and writes the terminal state to the
@@ -62,8 +53,24 @@ export async function runAgentJob(input: RunInput): Promise<Job | null> {
     }
   };
 
+  // Marks the job cancelled. This only stops the browser-side run (via the
+  // abort signal); server-side session cancel is a future task — until then
+  // the API's own run timeout is the backstop.
+  const markCancelled = async (): Promise<Job | null> => {
+    return updateJob(input.jobId, {
+      status: JobStatus.Cancelled,
+      error: "cancelled",
+      result: { reason: "cancelled", thread_id: input.threadId },
+    });
+  };
+
   try {
     logger.info("start", { attachments: input.attachments.length });
+
+    if (input.signal?.aborted) {
+      logger.info("cancelled_before_start");
+      return await markCancelled();
+    }
 
     await updateJob(input.jobId, { status: JobStatus.Running });
 
@@ -84,13 +91,7 @@ export async function runAgentJob(input: RunInput): Promise<Job | null> {
       attachments: input.attachments,
       threadId: input.threadId,
       maxWaitMs,
-      ...(config.sessionHoldMs > 0
-        ? {
-            sessionKey: sessionKeyFor(input.apiKeyId, input.projectId, input.threadId),
-            holdMs: config.sessionHoldMs,
-          }
-        : {}),
-    }, progress);
+    }, progress, input.signal);
 
     switch (outcome.kind) {
       case "completed":
@@ -158,6 +159,10 @@ export async function runAgentJob(input: RunInput): Promise<Job | null> {
         return null;
     }
   } catch (err) {
+    if (input.signal?.aborted) {
+      logger.info("cancelled");
+      return await markCancelled();
+    }
     if (err instanceof BrowserBusyError) {
       logger.warn("browser_busy", { err });
       return await updateJob(input.jobId, {
