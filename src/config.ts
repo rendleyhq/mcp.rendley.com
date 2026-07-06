@@ -71,7 +71,6 @@ const EnvSchema = z.object({
   CORS_ORIGINS: csvSchema,
   AUTH_BASE_URL: z.string().url().optional(),
   MCP_PUBLIC_URL: z.string().url().optional(),
-  OAUTH_SCOPES: csvSchema,
   OPENAI_APPS_CHALLENGE_TOKEN: z.string().default(""),
   BROWSER_WORKER_URL: z.string().url().optional(),
   BROWSER_WORKER_TOKEN: z.string().default(""),
@@ -145,7 +144,6 @@ export const config = {
       ? mcpPublicUrl
       : `${mcpPublicUrl}/mcp`
     : "",
-  oauthScopes: env.OAUTH_SCOPES,
   openaiAppsChallengeToken: env.OPENAI_APPS_CHALLENGE_TOKEN.trim(),
   browserWorkerUrl: env.BROWSER_WORKER_URL
     ? trimTrailingSlash(env.BROWSER_WORKER_URL)

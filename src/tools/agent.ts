@@ -17,7 +17,7 @@ import {
   resolveKeys,
   MAX_CONCURRENT_PER_END_USER,
 } from "@/concurrency-limits";
-import { resolveMcpMaxConcurrent } from "@/plan-cache";
+import { resolveMcpMaxConcurrent } from "@/plan";
 import { recordConcurrencyRejected, recordQueueFullRejected } from "@/metrics";
 import { log } from "@/logger";
 import { progressFromExtra } from "@/mcp/progress";
@@ -361,9 +361,14 @@ export function registerAgentTools(server: McpServer, deps: AgentToolDeps) {
       // Fairness gate: the backend owns the plan's concurrent-edit cap
       // (GET /agent/limits); we only count in-flight edits against it, so one
       // user can't occupy every browser. The queue caps the global total.
-      const maxConcurrent = await resolveMcpMaxConcurrent(userId, apiClient);
+      const maxConcurrent = await resolveMcpMaxConcurrent(apiClient);
       const { tenantKey, endUserKey } = resolveKeys(userId, end_user_id);
-      const reqs = [{ key: tenantKey, max: maxConcurrent }];
+      const reqs = [
+        { key: tenantKey, max: maxConcurrent },
+        // At most one in-flight edit per project — two concurrent edits on the
+        // same project would each load it in a separate tab and race on the save.
+        { key: `project:${project_id}`, max: 1 },
+      ];
       if (endUserKey !== tenantKey) {
         reqs.push({ key: endUserKey, max: MAX_CONCURRENT_PER_END_USER });
       }

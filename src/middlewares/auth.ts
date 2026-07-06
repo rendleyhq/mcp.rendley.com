@@ -1,54 +1,8 @@
-import { createHash } from "crypto";
 import type { Context, MiddlewareHandler } from "hono";
 import { ApiClient } from "@/api/client";
 import { config, protectedResourceMetadataUrl } from "@/config";
 import { log } from "@/logger";
-import { resolvePlanTier } from "@/plan-cache";
-
-// Short-lived cache of successful credential verifications, keyed by a hash of
-// the token (never the token itself). Skips a network round-trip to the API on
-// every request — polling-heavy callers (check_edit / GET jobs) hit this hard.
-// Only successes are cached, so revocation takes effect within the TTL and
-// failed guesses are never remembered.
-const AUTH_CACHE_TTL_MS = 60_000;
-const AUTH_CACHE_MAX = 10_000;
-
-interface CachedAuth {
-  apiKeyId: string;
-  userId: string;
-  expiresAt: number;
-}
-
-const authCache = new Map<string, CachedAuth>();
-
-function tokenCacheKey(token: string): string {
-  return createHash("sha256").update(token).digest("hex");
-}
-
-function getCachedAuth(key: string): CachedAuth | null {
-  const hit = authCache.get(key);
-  if (!hit) return null;
-  if (hit.expiresAt <= Date.now()) {
-    authCache.delete(key);
-    return null;
-  }
-  return hit;
-}
-
-function setCachedAuth(key: string, value: Omit<CachedAuth, "expiresAt">): void {
-  if (authCache.size >= AUTH_CACHE_MAX) {
-    const now = Date.now();
-    for (const [k, v] of authCache) {
-      if (v.expiresAt <= now) authCache.delete(k);
-    }
-    // Still full of live entries — drop oldest-inserted to stay bounded.
-    if (authCache.size >= AUTH_CACHE_MAX) {
-      const first = authCache.keys().next().value;
-      if (first) authCache.delete(first);
-    }
-  }
-  authCache.set(key, { ...value, expiresAt: Date.now() + AUTH_CACHE_TTL_MS });
-}
+import { resolvePlanTier } from "@/plan";
 
 export type AppEnv = {
   Variables: {
@@ -60,13 +14,9 @@ export type AppEnv = {
 };
 
 function unauthorized(c: Context<AppEnv>, message: string) {
-  const scope =
-    config.oauthScopes.length > 0
-      ? ` scope="${config.oauthScopes.join(" ")}"`
-      : "";
   c.header(
     "WWW-Authenticate",
-    `Bearer resource_metadata="${protectedResourceMetadataUrl()}"${scope}`,
+    `Bearer resource_metadata="${protectedResourceMetadataUrl()}"`,
   );
   return c.json({ error: { code: "UNAUTHORIZED", message } }, 401);
 }
@@ -95,19 +45,6 @@ export const requireBearer: MiddlewareHandler<AppEnv> = async (c, next) => {
     );
   }
 
-  const cacheKey = tokenCacheKey(bearer);
-  const cached = getCachedAuth(cacheKey);
-  if (cached) {
-    c.set("apiKey", bearer);
-    c.set(
-      "apiClient",
-      new ApiClient({ baseUrl: config.apiBaseUrl, apiKey: bearer }),
-    );
-    c.set("apiKeyId", cached.apiKeyId);
-    c.set("userId", cached.userId);
-    return next();
-  }
-
   // Verifier outage (not invalid_api_key) must fall through to OAuth, not 502 yet.
   let verified = null;
   let apiKeyUnavailable = false;
@@ -121,7 +58,6 @@ export const requireBearer: MiddlewareHandler<AppEnv> = async (c, next) => {
     }
   }
   if (verified) {
-    setCachedAuth(cacheKey, { apiKeyId: verified.keyId, userId: verified.userId });
     c.set("apiKey", bearer);
     c.set(
       "apiClient",
@@ -142,7 +78,6 @@ export const requireBearer: MiddlewareHandler<AppEnv> = async (c, next) => {
     oauthUnavailable = true;
   }
   if (oauth) {
-    setCachedAuth(cacheKey, { apiKeyId: `oauth:${oauth.userId}`, userId: oauth.userId });
     c.set("apiKey", bearer);
     c.set(
       "apiClient",
@@ -173,7 +108,7 @@ export const requireBearer: MiddlewareHandler<AppEnv> = async (c, next) => {
 // apiClient are set. resolvePlanTier fails open (assumes paid on a lookup
 // error), so a transient /users/me blip never locks out a paying customer.
 export const requirePaidPlan: MiddlewareHandler<AppEnv> = async (c, next) => {
-  const tier = await resolvePlanTier(c.get("userId"), c.get("apiClient"));
+  const tier = await resolvePlanTier(c.get("apiClient"));
   if (tier === "free") {
     log.info("mcp_blocked_free_plan", { userId: c.get("userId") });
     return c.json(

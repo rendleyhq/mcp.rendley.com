@@ -37,11 +37,9 @@ async function sampleJsHeap(page: import("playwright").Page): Promise<HeapSample
 
 // Deterministic completion (bridge v2): the editor reports the run lifecycle
 // directly, so we exit the instant the run reaches a terminal state instead of
-// waiting for IDLE_CONFIRMATIONS quiet ticks. Only trusted when the terminal
-// state belongs to a run started after `runIdFloor` (guards reused pages).
+// waiting for IDLE_CONFIRMATIONS quiet ticks.
 function terminalRunState(
   status: BridgeStatus,
-  runIdFloor: number,
 ): BridgeRunStatus.Completed | BridgeRunStatus.Error | BridgeRunStatus.Cancelled | null {
   const runStatus = status.lastRunStatus;
   if (
@@ -51,7 +49,6 @@ function terminalRunState(
   ) {
     return null;
   }
-  if ((status.runId ?? 0) <= runIdFloor) return null;
   return runStatus;
 }
 
@@ -62,7 +59,6 @@ export async function pollAgentCore(opts: PollOptions): Promise<PollOutcome> {
     component: "pollAgentCore",
   });
   const onProgress = opts.onProgress ?? (() => {});
-  const runIdFloor = opts.runIdFloor ?? 0;
 
   let lastCommandCount = 0;
   let lastStreaming: boolean | null = null;
@@ -198,7 +194,7 @@ export async function pollAgentCore(opts: PollOptions): Promise<PollOutcome> {
 
     // Deterministic path (bridge v2): the editor tells us the run ended.
     if (status.lastRunStatus !== undefined) {
-      const terminal = terminalRunState(status, runIdFloor);
+      const terminal = terminalRunState(status);
       if (terminal === BridgeRunStatus.Error || terminal === BridgeRunStatus.Cancelled) {
         if (status.commandExecutions > 0) {
           await bridge.flushSave(page, ENSURE_SAVED_TIMEOUT_MS).catch(() => {});

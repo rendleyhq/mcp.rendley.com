@@ -13,7 +13,7 @@ import {
   resolveKeys,
   MAX_CONCURRENT_PER_END_USER,
 } from "@/concurrency-limits";
-import { resolveMcpMaxConcurrent } from "@/plan-cache";
+import { resolveMcpMaxConcurrent } from "@/plan";
 import { recordConcurrencyRejected, recordQueueFullRejected } from "@/metrics";
 
 interface Deps {
@@ -174,7 +174,7 @@ export async function handleStartAgentJob(
   // Fairness gate: the backend owns the plan's concurrent-edit cap
   // (GET /agent/limits); we only count in-flight edits against it, so one
   // user can't occupy every browser. The queue caps the global total.
-  const maxConcurrent = await resolveMcpMaxConcurrent(deps.userId, deps.apiClient);
+  const maxConcurrent = await resolveMcpMaxConcurrent(deps.apiClient);
   const { tenantKey, endUserKey } = resolveKeys(deps.userId, endUserId);
   const reqs = [{ key: tenantKey, max: maxConcurrent }];
   if (endUserKey !== tenantKey) {
@@ -189,7 +189,7 @@ export async function handleStartAgentJob(
     );
   }
 
-  const releaseSlots = () => acquired.release();
+  let releaseSlots = () => acquired.release();
 
   const queryThreadId = new URL(req.url).searchParams.get("thread_id");
   const threadId = body.thread_id ?? queryThreadId ?? undefined;
@@ -219,6 +219,23 @@ export async function handleStartAgentJob(
       err instanceof Error ? err.message : String(err),
     );
   }
+
+  // At most one in-flight edit per project — two concurrent edits on the same
+  // project would each load it in a separate tab and race on the save.
+  const projectSlot = await acquireAll([{ key: `project:${projectId}`, max: 1 }]);
+  if (!projectSlot) {
+    releaseSlots();
+    recordConcurrencyRejected();
+    log.warn("project_edit_in_progress", { projectId });
+    return concurrencyRejected(
+      "An edit is already running on this project. Wait for it to finish and retry.",
+    );
+  }
+  const releaseFairness = releaseSlots;
+  releaseSlots = async () => {
+    await releaseFairness();
+    await projectSlot.release();
+  };
 
   let resolvedThreadId: string;
   if (threadId) {

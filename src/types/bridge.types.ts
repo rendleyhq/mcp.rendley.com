@@ -27,9 +27,8 @@ export interface BridgeStatus {
   isSyncing: boolean;
   commandExecutions: number;
   lastError?: string | null;
-  // Deterministic run lifecycle (bridge v2). Older editor builds omit both —
+  // Deterministic run lifecycle (bridge v2). Older editor builds omit it —
   // pollers must fall back to the idle heuristic when undefined.
-  runId?: number;
   lastRunStatus?: BridgeRunStatus;
 }
 

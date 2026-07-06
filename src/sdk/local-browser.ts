@@ -17,9 +17,6 @@ export class LocalAgentBrowser extends AgentBrowser {
     await onProgress("Opening editor");
     const page = await acquireEditorPage(input.headlessUrl, input.projectId);
     try {
-      // Snapshot the run counter before sending so the deterministic completion
-      // check only trusts terminal states from the run we start below.
-      const preStatus = await bridge.getStatus(page).catch(() => null);
       await onProgress("Sending message to agent");
       await bridge.sendMessage(
         page,
@@ -35,7 +32,6 @@ export class LocalAgentBrowser extends AgentBrowser {
         autoApprove: true,
         logger,
         onProgress,
-        runIdFloor: preStatus?.runId,
       });
     } catch (err) {
       await releasePage(page).catch(() => {});

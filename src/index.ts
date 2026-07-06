@@ -15,7 +15,7 @@ import { registerAgentTools } from "@/tools/agent";
 import { registerExportTools } from "@/tools/export";
 import { registerBrandkitTools } from "@/tools/brandkit";
 import { registerUploadTools } from "@/tools/uploads";
-import { resolvePlanTier } from "@/plan-cache";
+import { resolvePlanTier } from "@/plan";
 import { fail } from "@/response";
 import { handleStartAgentJob } from "@/http/agent";
 import { handleGetJob, handleCancelJob } from "@/http/jobs";
@@ -109,9 +109,6 @@ const protectedResourceMetadata = () => ({
   resource: config.mcpResource,
   authorization_servers: [config.authIssuer],
   bearer_methods_supported: ["header"],
-  ...(config.oauthScopes.length > 0
-    ? { scopes_supported: config.oauthScopes }
-    : {}),
 });
 app.get(PROTECTED_RESOURCE_METADATA_PATH, (c) =>
   c.json(protectedResourceMetadata()),
@@ -209,7 +206,7 @@ async function handleMCPRequest(c: Context<AppEnv>): Promise<Response> {
   const userId = c.get("userId");
 
   // Paid-only: free plans get every tool call answered with an upgrade prompt.
-  if ((await resolvePlanTier(userId, apiClient)) === "free") {
+  if ((await resolvePlanTier(apiClient)) === "free") {
     installFreePlanPaywall(server);
   }
 
