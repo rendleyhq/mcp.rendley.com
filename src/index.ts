@@ -7,8 +7,7 @@ import { McpServer } from "@modelcontextprotocol/sdk/server/mcp.js";
 import { WebStandardStreamableHTTPServerTransport } from "@modelcontextprotocol/sdk/server/webStandardStreamableHttp.js";
 import { config, PROTECTED_RESOURCE_METADATA_PATH } from "@/config";
 import { BrowserMode } from "@/constants";
-import { requireBearer, type AppEnv } from "@/middlewares/auth";
-import { userRateLimit } from "@/rate-limit";
+import { requireBearer, requirePaidPlan, type AppEnv } from "@/middlewares/auth";
 import "@/metrics";
 import { registerProjectTools } from "@/tools/projects";
 import { registerAccountTools } from "@/tools/account";
@@ -16,8 +15,10 @@ import { registerAgentTools } from "@/tools/agent";
 import { registerExportTools } from "@/tools/export";
 import { registerBrandkitTools } from "@/tools/brandkit";
 import { registerUploadTools } from "@/tools/uploads";
+import { isPaidPlan } from "@/plan";
+import { fail } from "@/response";
 import { handleStartAgentJob } from "@/http/agent";
-import { handleGetJob } from "@/http/jobs";
+import { handleGetJob, handleCancelJob } from "@/http/jobs";
 import { handleUploadBrandAsset } from "@/http/brandkit";
 import { handleStreamUpload } from "@/http/uploads";
 import { MAX_UPLOAD_BYTES } from "@/http/upload-tokens";
@@ -108,9 +109,6 @@ const protectedResourceMetadata = () => ({
   resource: config.mcpResource,
   authorization_servers: [config.authIssuer],
   bearer_methods_supported: ["header"],
-  ...(config.oauthScopes.length > 0
-    ? { scopes_supported: config.oauthScopes }
-    : {}),
 });
 app.get(PROTECTED_RESOURCE_METADATA_PATH, (c) =>
   c.json(protectedResourceMetadata()),
@@ -125,9 +123,12 @@ if (config.openaiAppsChallengeToken) {
   );
 }
 
-app.all("/mcp", requireBearer, userRateLimit, (c) => handleMCPRequest(c));
+// Free plans can connect and list tools, but each tool call returns an upgrade
+// prompt (paywall handled per-tool in handleMCPRequest) — softer than a hard
+// transport block, so the assistant can nudge the user to upgrade in-chat.
+app.all("/mcp", requireBearer, (c) => handleMCPRequest(c));
 
-app.post("/v1/agent", requireBearer, userRateLimit, (c) =>
+app.post("/v1/agent", requireBearer, requirePaidPlan, (c) =>
   handleStartAgentJob(c.req.raw, {
     apiClient: c.get("apiClient"),
     apiKey: c.get("apiKey"),
@@ -136,7 +137,7 @@ app.post("/v1/agent", requireBearer, userRateLimit, (c) =>
   }),
 );
 
-app.post("/v1/brandkit/assets", requireBearer, userRateLimit, (c) =>
+app.post("/v1/brandkit/assets", requireBearer, requirePaidPlan, (c) =>
   handleUploadBrandAsset(c.req.raw, { apiClient: c.get("apiClient") }),
 );
 
@@ -145,11 +146,14 @@ app.put("/v1/uploads/stream/:token", (c) =>
   handleStreamUpload(c.req.raw, c.req.param("token")),
 );
 
-app.get("/v1/jobs/:id", requireBearer, userRateLimit, (c) =>
+app.get("/v1/jobs/:id", requireBearer, (c) =>
   handleGetJob(c.req.param("id"), c.get("apiKeyId")),
 );
-app.get("/v1/agent/jobs/:id", requireBearer, userRateLimit, (c) =>
+app.get("/v1/agent/jobs/:id", requireBearer, (c) =>
   handleGetJob(c.req.param("id"), c.get("apiKeyId")),
+);
+app.post("/v1/agent/jobs/:id/cancel", requireBearer, (c) =>
+  handleCancelJob(c.req.param("id"), c.get("apiKeyId"), c.get("apiClient")),
 );
 
 function withMcpAccept(req: Request): Request {
@@ -168,6 +172,26 @@ function withMcpAccept(req: Request): Request {
   return new Request(req, { headers });
 }
 
+const FREE_PLAN_PAYWALL_MESSAGE =
+  "The Rendley MCP is available on paid plans. Let the user know they need to upgrade at https://app.rendley.com to create or edit videos from their assistant, then stop — do not retry.";
+
+// Keeps every tool listed (so the assistant sees what's possible) but swaps each
+// handler for an upgrade prompt. Used for free plans: the MCP is a paid feature,
+// but a soft paywall lets the assistant nudge the user rather than failing to
+// connect. Wrap before registering so all tools are covered in one place.
+function installFreePlanPaywall(server: McpServer): void {
+  const register = server.registerTool.bind(server) as (
+    name: string,
+    config: unknown,
+    cb: unknown,
+  ) => unknown;
+  (server as unknown as { registerTool: typeof register }).registerTool = (
+    name,
+    config,
+    _cb,
+  ) => register(name, config, async () => fail(FREE_PLAN_PAYWALL_MESSAGE));
+}
+
 async function handleMCPRequest(c: Context<AppEnv>): Promise<Response> {
   const apiClient = c.get("apiClient");
 
@@ -181,9 +205,19 @@ async function handleMCPRequest(c: Context<AppEnv>): Promise<Response> {
 
   const userId = c.get("userId");
 
+  // Paid-only: free plans get every tool call answered with an upgrade prompt.
+  if (!(await isPaidPlan(apiClient))) {
+    installFreePlanPaywall(server);
+  }
+
   registerProjectTools(server, apiClient);
   registerAccountTools(server, apiClient);
-  registerAgentTools(server, apiClient, userId);
+  registerAgentTools(server, {
+    apiClient,
+    userId,
+    apiKey: c.get("apiKey"),
+    apiKeyId: c.get("apiKeyId"),
+  });
   registerExportTools(server, apiClient);
   registerBrandkitTools(server, apiClient);
   registerUploadTools(server, apiClient);

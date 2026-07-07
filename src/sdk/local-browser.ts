@@ -28,7 +28,7 @@ export class LocalAgentBrowser extends AgentBrowser {
         projectId: input.projectId,
         release: releasePage,
         threadId: input.threadId ?? null,
-        maxWaitMs: config.agentTimeoutMs,
+        maxWaitMs: input.maxWaitMs ?? config.agentTimeoutMs,
         autoApprove: true,
         logger,
         onProgress,

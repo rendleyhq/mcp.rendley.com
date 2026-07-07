@@ -25,24 +25,26 @@ const intSchema = (fallback: number, min = 1) =>
 
 // Fixed tuning, not configurable via env.
 const constants = {
-  syncAgentTimeoutMs: 280_000,
   exportPollTimeoutMs: 25 * 60 * 1000,
   exportPollIntervalMs: 3000,
-  planConcurrency: {
-    starter: 3,
-    pro: 5,
-    business: 10,
-    free: 1,
-  },
-  maxConcurrentPerEndUser: 3,
   maxBrowserBusyRetries: 2,
   diskCacheBytes: 2 * 1024 * 1024 * 1024,
+  // Transient worker connect/pre-stream failures (fetch error, 5xx, stall before
+  // any progress) are safe to re-dispatch since no edit has started yet.
+  maxWorkerConnectRetries: 2,
+  // Minimum spacing between browser-worker launch attempts. Cloudflare admits
+  // ~1 new browser per second account-wide; an unpaced burst just converts
+  // into BROWSER_BUSY failures once the retry budget runs out. Per-replica —
+  // raise proportionally if the MCP ever runs more than one replica.
+  browserLaunchIntervalMs: 1000,
 } as const;
 
 // Defaults for the env-overridable tuning knobs below.
 const defaults = {
   queueConcurrency: 120,
-  queueMaxQueued: 1000,
+  // Global cap on edits in flight (waiting for a slot, queued, or running). The
+  // only hard rejection — per-tenant caps make requests wait, not fail.
+  queueMaxQueued: 2000,
   agentTimeoutMs: 8 * 60 * 1000,
   browserRecycleAfter: 8,
   chromiumJsHeapMb: 512,
@@ -71,7 +73,6 @@ const EnvSchema = z.object({
   CORS_ORIGINS: csvSchema,
   AUTH_BASE_URL: z.string().url().optional(),
   MCP_PUBLIC_URL: z.string().url().optional(),
-  OAUTH_SCOPES: csvSchema,
   OPENAI_APPS_CHALLENGE_TOKEN: z.string().default(""),
   BROWSER_WORKER_URL: z.string().url().optional(),
   BROWSER_WORKER_TOKEN: z.string().default(""),
@@ -87,13 +88,18 @@ const EnvSchema = z.object({
   QUEUE_MAX_QUEUED: intSchema(defaults.queueMaxQueued),
   BROWSER_RECYCLE_AFTER: intSchema(defaults.browserRecycleAfter),
   AGENT_TIMEOUT_MS: intSchema(defaults.agentTimeoutMs),
+  // Abort a worker run if no stream event (progress, result, or ping heartbeat)
+  // arrives within this window, instead of waiting out the full run deadline.
+  WORKER_STALL_TIMEOUT_MS: intSchema(60 * 1000),
   CHROMIUM_JS_HEAP_MB: intSchema(defaults.chromiumJsHeapMb),
   HEADLESS: boolSchema(defaults.headless),
   USE_CHROME_CHANNEL: boolSchema(defaults.useChromeChannel),
   CPU_ONLY: boolSchema(false),
+  // Debug only (local browser mode): leave the browser open after a run so you
+  // can inspect the editor's console/network/timeline. Pair with HEADLESS=false.
+  // Every run then leaks a browser, so only use it while debugging locally.
+  KEEP_BROWSER_OPEN: boolSchema(false),
 
-  RATE_LIMIT_WINDOW_MS: intSchema(60_000),
-  RATE_LIMIT_MAX: intSchema(240, 0),
 });
 
 const env = EnvSchema.parse(process.env);
@@ -115,14 +121,12 @@ export const config = {
   queueMaxQueued: env.QUEUE_MAX_QUEUED,
   browserRecycleAfter: env.BROWSER_RECYCLE_AFTER,
   agentTimeoutMs: env.AGENT_TIMEOUT_MS,
+  workerStallTimeoutMs: env.WORKER_STALL_TIMEOUT_MS,
   chromiumJsHeapMb: env.CHROMIUM_JS_HEAP_MB,
   headless: env.HEADLESS,
   useChromeChannel: env.USE_CHROME_CHANNEL,
   cpuOnly: env.CPU_ONLY,
-  rateLimit: {
-    windowMs: env.RATE_LIMIT_WINDOW_MS,
-    max: env.RATE_LIMIT_MAX,
-  },
+  keepBrowserOpen: env.KEEP_BROWSER_OPEN,
   corsOrigins: env.CORS_ORIGINS,
   authBaseUrl,
   authIssuer: new URL(authBaseUrl).origin,
@@ -132,7 +136,6 @@ export const config = {
       ? mcpPublicUrl
       : `${mcpPublicUrl}/mcp`
     : "",
-  oauthScopes: env.OAUTH_SCOPES,
   openaiAppsChallengeToken: env.OPENAI_APPS_CHALLENGE_TOKEN.trim(),
   browserWorkerUrl: env.BROWSER_WORKER_URL
     ? trimTrailingSlash(env.BROWSER_WORKER_URL)

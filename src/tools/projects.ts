@@ -162,7 +162,7 @@ export function registerProjectTools(server: McpServer, apiClient: ApiClient) {
     {
       title: "Create project",
       description:
-        "Create a new video project. Defaults to the user's first workspace unless you pass one.",
+        "Create a new video project. Defaults to the user's first workspace unless you pass one, and creates a workspace automatically if the user has none.",
       inputSchema: {
         name: z.string().min(1).max(256).describe("Name for the project"),
         workspace_id: z
@@ -180,14 +180,10 @@ export function registerProjectTools(server: McpServer, apiClient: ApiClient) {
     },
     async ({ name, workspace_id }) => {
       try {
-        let wsId = workspace_id;
-        if (!wsId) {
-          const workspaces = await apiClient.listWorkspaces();
-          if (workspaces.length === 0) {
-            return fail("No workspaces found. Create one first.");
-          }
-          wsId = workspaces[0].id;
-        }
+        // A project can't exist without a workspace. Workspaces are provisioned
+        // client-side now, so the user may not have one yet — create one on the
+        // fly rather than failing.
+        const wsId = await apiClient.resolveOrCreateWorkspace(workspace_id);
 
         const project = await apiClient.createProject({
           name,
@@ -263,6 +259,52 @@ export function registerProjectTools(server: McpServer, apiClient: ApiClient) {
         };
       } catch (err) {
         return fail(`Could not fetch project: ${formatError(err)}`);
+      }
+    },
+  );
+
+  server.registerTool(
+    "duplicate_project",
+    {
+      title: "Duplicate project",
+      description:
+        "Create a copy of an existing project, including its media assets. Returns the new project's project_id — use that for follow-up calls; the original is left untouched.",
+      inputSchema: {
+        project_id: z.string().regex(ID_RE).describe("Project to duplicate"),
+      },
+      outputSchema: outputAny,
+      annotations: {
+        readOnlyHint: false,
+        destructiveHint: false,
+        openWorldHint: false,
+      },
+    },
+    async ({ project_id }) => {
+      try {
+        const project = await apiClient.duplicateProject(project_id);
+        return {
+          content: [
+            {
+              type: "text" as const,
+              text:
+                `Duplicated into **${project.name}** (project_id: \`${project.id}\`)\n\n` +
+                "Use this new project_id for follow-up calls such as edit_video and export_project. The original project is unchanged.",
+            },
+          ],
+          structuredContent: {
+            project: {
+              id: project.id,
+              name: project.name,
+              workspace_id: project.workspace_id,
+              fit_duration: project.fit_duration,
+              thumbnail_url: project.thumbnail_url,
+              created_at: project.created_at,
+              updated_at: project.updated_at,
+            },
+          },
+        };
+      } catch (err) {
+        return fail(`Could not duplicate project: ${formatError(err)}`);
       }
     },
   );

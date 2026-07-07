@@ -245,10 +245,62 @@ export async function acquireEditorPage(
   }
 
   authDiagnostics.dispose();
+
+  // Debug: stream the editor's console errors and failed/error API responses to
+  // our logs for the rest of the run. Gated so it never adds noise in prod.
+  if (config.keepBrowserOpen) attachDebugStream(page, projectId);
+
   return page;
 }
 
+// Streams the editor page's console errors, uncaught page errors, and failed or
+// 4xx/5xx API responses to our logs. Debug-only (see KEEP_BROWSER_OPEN) — it
+// runs for the whole session, so it's too chatty for normal operation.
+function attachDebugStream(page: Page, projectId: string): void {
+  const logger = log.child({ projectId, component: "editorDebugStream" });
+
+  page.on("console", (message) => {
+    const type = message.type();
+    if (type !== "error" && type !== "warning") return;
+    logger.warn("editor_console", { level: type, text: message.text() });
+  });
+
+  page.on("pageerror", (error) => {
+    logger.error("editor_page_error", { message: error.message });
+  });
+
+  page.on("requestfailed", (request) => {
+    logger.warn("editor_request_failed", {
+      url: scrubUrls(request.url()),
+      error: request.failure()?.errorText,
+    });
+  });
+
+  page.on("response", async (response) => {
+    const status = response.status();
+    if (status < 400) return;
+    // Only bodies for API calls; asset 404s aren't worth the read.
+    const url = response.url();
+    const isApi = url.includes("/v1/") || url.includes("/api/");
+    const body = isApi ? await response.text().catch(() => undefined) : undefined;
+    logger.warn("editor_response_error", {
+      status,
+      url: scrubUrls(url),
+      ...(body ? { body: body.slice(0, 500) } : {}),
+    });
+  });
+}
+
 export async function releasePage(page: Page): Promise<void> {
+  // Debug escape hatch: keep the browser open so it can be inspected by hand.
+  // Leaks a browser per run, so it's env-gated and local-only.
+  if (config.keepBrowserOpen) {
+    log.warn("keep_browser_open", {
+      url: scrubUrls(page.url()),
+      hint: "KEEP_BROWSER_OPEN is set — browser left open for inspection; restart the process to reclaim it",
+    });
+    return;
+  }
   const browser = page.context().browser();
   try {
     if (browser) await browser.close();

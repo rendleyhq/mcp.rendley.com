@@ -1,32 +1,37 @@
 import PQueue from "p-queue";
 import { config } from "@/config";
 
+// Concurrency here is the browser-spawn limit: at most this many agent runs
+// launch a browser at once. Everything else waits in the queue.
 export const jobQueue = new PQueue({ concurrency: config.queueConcurrency });
 
-export class QueueFullError extends Error {
-  constructor(stats: ReturnType<typeof getQueueStats>) {
-    super(
-      `queue is saturated (running=${stats.running}, queued=${stats.queued}, max_queued=${stats.maxQueued})`,
-    );
-    this.name = "QueueFullError";
-  }
+// Global admission cap (config.queueMaxQueued): total edits in flight across all
+// tenants — waiting for a run slot, queued, or running. This is the ONLY hard
+// rejection. Per-tenant caps make a request wait for a slot rather than turning
+// it away, so a request is only refused when the whole server is this deep in
+// pending work.
+let pendingTasks = 0;
+
+// Reserve a global slot for one edit. Returns false when at capacity (the caller
+// must reject). Pair every successful reserve with exactly one releaseTask.
+export function tryReserveTask(): boolean {
+  if (pendingTasks >= config.queueMaxQueued) return false;
+  pendingTasks += 1;
+  return true;
 }
 
-const totalCap = () => config.queueConcurrency + config.queueMaxQueued;
+export function releaseTask(): void {
+  if (pendingTasks > 0) pendingTasks -= 1;
+}
 
 export function getQueueStats() {
-  const admitted = jobQueue.size + jobQueue.pending;
   return {
     concurrency: config.queueConcurrency,
     running: jobQueue.pending,
     queued: jobQueue.size,
-    maxQueued: config.queueMaxQueued,
-    isSaturated: admitted >= totalCap(),
+    pending: pendingTasks,
+    maxPending: config.queueMaxQueued,
   };
-}
-
-export function isQueueFull(): boolean {
-  return jobQueue.size + jobQueue.pending >= totalCap();
 }
 
 export async function runQueued<T>(
@@ -35,14 +40,4 @@ export async function runQueued<T>(
 ): Promise<T> {
   const result = await jobQueue.add(task, signal ? { signal } : undefined);
   return result as T;
-}
-
-export async function tryRunQueued<T>(
-  task: () => Promise<T>,
-  signal?: AbortSignal,
-): Promise<T> {
-  if (isQueueFull()) {
-    throw new QueueFullError(getQueueStats());
-  }
-  return runQueued(task, signal);
 }

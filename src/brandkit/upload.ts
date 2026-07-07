@@ -5,12 +5,23 @@ import { safeFetchMedia } from "@/utils/url-guard";
 const MAX_ASSET_BYTES = 50 * 1024 * 1024;
 const ASSET_FETCH_TIMEOUT_MS = 30_000;
 
-// asset_type must match dashboard section IDs or the asset uploads but never renders.
-export function assetTypeFromMime(mime: string): string {
-  const m = mime.toLowerCase();
-  if (m.startsWith("video/")) return "videos";
-  if (m.startsWith("audio/")) return "music";
-  return "images";
+// The brand kit accepts exactly these upload categories (api IsValidBrandkitCategory); anything
+// else is rejected with a 400. "logos" can't be inferred from a MIME type, so it must be passed
+// explicitly; everything non-font falls into the general "assets" bucket.
+export const BRANDKIT_CATEGORIES = ["logos", "fonts", "assets"] as const;
+export type BrandkitCategory = (typeof BRANDKIT_CATEGORIES)[number];
+
+const FONT_MIME_RE =
+  /^(font\/|application\/(x-font-|font-|vnd\.ms-fontobject))/;
+const FONT_EXT_RE = /\.(ttf|otf|woff2?|eot)$/i;
+
+// Uploading a font file (category "fonts") registers it as a brand font on completion.
+export function isFontAsset(mime: string, fileName?: string): boolean {
+  return FONT_MIME_RE.test(mime.toLowerCase()) || (!!fileName && FONT_EXT_RE.test(fileName));
+}
+
+export function assetTypeFromMime(mime: string, fileName?: string): BrandkitCategory {
+  return isFontAsset(mime, fileName) ? "fonts" : "assets";
 }
 
 export interface UploadBrandAssetResult {
@@ -36,7 +47,7 @@ export async function uploadBrandAssetFromUrl(
     input.name?.trim() || basename(new URL(input.url).pathname) || "asset";
 
   const created = await apiClient.createBrandkitUpload(workspaceId, {
-    assetType: input.category ?? assetTypeFromMime(mimeType),
+    assetType: input.category ?? assetTypeFromMime(mimeType, name),
     mimeType,
     fileSize: fetched.size,
     originalFileName: name,

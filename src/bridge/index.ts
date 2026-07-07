@@ -53,6 +53,17 @@ export const bridge = {
     )) as FlushSaveResult;
   },
 
+  // Prefers the deterministic saveNow (bridge v2, awaits the actual PATCH) and
+  // falls back to the event + sync-poll ensureSaved on older editor builds.
+  async flushSave(page: Page, timeoutMs = 60000): Promise<FlushSaveResult> {
+    return (await page.evaluate(async (ms) => {
+      const agent = window.__rendleyAgent;
+      if (!agent) return { status: "error" as const };
+      if (typeof agent.saveNow === "function") return await agent.saveNow(ms);
+      return await agent.ensureSaved(ms);
+    }, timeoutMs)) as FlushSaveResult;
+  },
+
   lastAssistantContent(messages: BridgeMessage[]): string {
     for (let i = messages.length - 1; i >= 0; i--) {
       if (messages[i].role === "assistant") return messages[i].content ?? "";

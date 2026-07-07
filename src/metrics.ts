@@ -12,29 +12,16 @@ const queued = meter.createObservableGauge("mcp.queue.queued", {
 running.addCallback((r) => r.observe(getQueueStats().running));
 queued.addCallback((r) => r.observe(getQueueStats().queued));
 
-const concurrencyRejectedCounter = meter.createCounter(
-  "mcp.concurrency.rejected",
-  { description: "Requests rejected by the per-tenant/end-user concurrency cap." },
-);
 const queueFullRejectedCounter = meter.createCounter("mcp.queue.full_rejected", {
-  description: "Requests rejected because the queue hit its DoS ceiling.",
+  description: "Edits rejected because the global pending cap (2000) was reached.",
 });
-const rateLimitedCounter = meter.createCounter("mcp.rate_limited", {
-  description: "Requests rejected by the per-API-key rate limiter.",
-});
-const planDowngradeCounter = meter.createCounter("mcp.plan_cap.downgraded", {
-  description: "Plan-cap resolutions that fell back to the free tier on API error.",
+const planResolveFailedCounter = meter.createCounter("mcp.plan_resolve.failed", {
+  description: "Plan lookups (/users/me) that failed and fell back to the fail-open default (assume paid, fallback concurrency cap).",
 });
 
-export function recordConcurrencyRejected(): void {
-  concurrencyRejectedCounter.add(1);
-}
 export function recordQueueFullRejected(): void {
   queueFullRejectedCounter.add(1);
 }
-export function recordRateLimited(): void {
-  rateLimitedCounter.add(1);
-}
-export function recordPlanDowngrade(): void {
-  planDowngradeCounter.add(1);
+export function recordPlanResolveFailed(): void {
+  planResolveFailedCounter.add(1);
 }

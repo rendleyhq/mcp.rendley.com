@@ -5,7 +5,10 @@ import { BrowserBusyError } from "@/sdk/remote-browser";
 import { updateJob } from "@/jobs/index";
 import { log } from "@/logger";
 import type { BridgeAttachment } from "@/types/bridge.types";
+import type { Job } from "@/types/jobs.types";
 import { JobStatus } from "@/types/jobs.types";
+
+const PROGRESS_RING_SIZE = 20;
 
 interface RunInput {
   jobId: string;
@@ -16,9 +19,17 @@ interface RunInput {
   attachments: BridgeAttachment[];
   maxWaitMs?: number;
   threadId: string;
+  // Live progress forwarding (e.g. MCP progress notifications during the
+  // synchronous window). Progress is always persisted on the job regardless.
+  onProgress?: (message: string) => void | Promise<void>;
+  // Aborts the browser-worker run (user cancel / explicit cancel endpoint).
+  signal?: AbortSignal;
 }
 
-export async function runAgentJob(input: RunInput): Promise<void> {
+// Runs the browser-mediated agent edit and writes the terminal state to the
+// job store. Returns the final job record so synchronous callers (the hybrid
+// edit_video window) can use the result without re-reading the store.
+export async function runAgentJob(input: RunInput): Promise<Job | null> {
   const maxWaitMs = input.maxWaitMs ?? config.agentTimeoutMs;
   const logger = log.child({
     jobId: input.jobId,
@@ -26,8 +37,39 @@ export async function runAgentJob(input: RunInput): Promise<void> {
     component: "agentRunner",
   });
 
+  const progressRing: string[] = [];
+  const progress = async (message: string): Promise<void> => {
+    progressRing.push(message);
+    if (progressRing.length > PROGRESS_RING_SIZE) progressRing.shift();
+    await updateJob(input.jobId, {
+      progress: [...progressRing],
+      last_progress_at: Date.now(),
+    }).catch(() => {});
+    try {
+      await input.onProgress?.(message);
+    } catch {
+      // progress forwarding is best-effort (client may have disconnected)
+    }
+  };
+
+  // Marks the job cancelled. This only stops the browser-side run (via the
+  // abort signal); server-side session cancel is a future task — until then
+  // the API's own run timeout is the backstop.
+  const markCancelled = async (): Promise<Job | null> => {
+    return updateJob(input.jobId, {
+      status: JobStatus.Cancelled,
+      error: "cancelled",
+      result: { reason: "cancelled", thread_id: input.threadId },
+    });
+  };
+
   try {
     logger.info("start", { attachments: input.attachments.length });
+
+    if (input.signal?.aborted) {
+      logger.info("cancelled_before_start");
+      return await markCancelled();
+    }
 
     await updateJob(input.jobId, { status: JobStatus.Running });
 
@@ -48,11 +90,11 @@ export async function runAgentJob(input: RunInput): Promise<void> {
       attachments: input.attachments,
       threadId: input.threadId,
       maxWaitMs,
-    }, () => {});
+    }, progress, input.signal);
 
     switch (outcome.kind) {
       case "completed":
-        await updateJob(input.jobId, {
+        return await updateJob(input.jobId, {
           status: JobStatus.Completed,
           last_message: outcome.lastMessage,
           result: {
@@ -63,10 +105,9 @@ export async function runAgentJob(input: RunInput): Promise<void> {
             thread_id: input.threadId,
           },
         });
-        break;
 
       case "save_failed":
-        await updateJob(input.jobId, {
+        return await updateJob(input.jobId, {
           status: JobStatus.Failed,
           last_message: outcome.lastMessage,
           error: `save not confirmed: ${outcome.saveStatus}`,
@@ -76,10 +117,9 @@ export async function runAgentJob(input: RunInput): Promise<void> {
             thread_id: input.threadId,
           },
         });
-        break;
 
       case "timeout":
-        await updateJob(input.jobId, {
+        return await updateJob(input.jobId, {
           status: JobStatus.Failed,
           last_message: outcome.lastMessage,
           error: `agent exceeded ${maxWaitMs}ms timeout`,
@@ -89,10 +129,9 @@ export async function runAgentJob(input: RunInput): Promise<void> {
             thread_id: input.threadId,
           },
         });
-        break;
 
       case "error":
-        await updateJob(input.jobId, {
+        return await updateJob(input.jobId, {
           status: JobStatus.Failed,
           last_message: outcome.lastMessage,
           error: outcome.error,
@@ -102,10 +141,9 @@ export async function runAgentJob(input: RunInput): Promise<void> {
             thread_id: input.threadId,
           },
         });
-        break;
 
       case "interrupt":
-        await updateJob(input.jobId, {
+        return await updateJob(input.jobId, {
           status: JobStatus.Failed,
           last_message: outcome.lastMessage,
           error: `unexpected interrupt: ${outcome.status.interruptType ?? "unknown"}`,
@@ -115,12 +153,18 @@ export async function runAgentJob(input: RunInput): Promise<void> {
             thread_id: input.threadId,
           },
         });
-        break;
+
+      default:
+        return null;
     }
   } catch (err) {
+    if (input.signal?.aborted) {
+      logger.info("cancelled");
+      return await markCancelled();
+    }
     if (err instanceof BrowserBusyError) {
       logger.warn("browser_busy", { err });
-      await updateJob(input.jobId, {
+      return await updateJob(input.jobId, {
         status: JobStatus.Failed,
         error: "browser worker at capacity",
         result: {
@@ -130,10 +174,9 @@ export async function runAgentJob(input: RunInput): Promise<void> {
             : {}),
         },
       });
-      return;
     }
     logger.error("failed", { err });
-    await updateJob(input.jobId, {
+    return await updateJob(input.jobId, {
       status: JobStatus.Failed,
       error: err instanceof Error ? err.message : String(err),
     });
