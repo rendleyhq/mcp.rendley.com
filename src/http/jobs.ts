@@ -2,8 +2,6 @@ import type { ApiClient } from "@/api/client";
 import { getJob, jobToResponse } from "@/jobs/index";
 import { cancelAgentJob } from "@/agent-cancel";
 
-const JOB_ID_RE =
-  /^[0-9a-f]{8}-[0-9a-f]{4}-[1-5][0-9a-f]{3}-[89ab][0-9a-f]{3}-[0-9a-f]{12}$/i;
 const NOT_FOUND_MESSAGE =
   "This edit could no longer be found. It may have finished a while ago — please run the edit again.";
 
@@ -15,10 +13,6 @@ function jsonError(status: number, code: string, message: string): Response {
 }
 
 export async function handleGetJob(jobId: string, apiKeyId: string): Promise<Response> {
-  if (!JOB_ID_RE.test(jobId)) {
-    return jsonError(400, "BAD_REQUEST", "invalid job id format");
-  }
-
   const job = await getJob(jobId);
   // Wrong-owner returns 404 (not 403) so probes can't enumerate job existence.
   if (!job || job.owner_key_id !== apiKeyId) {
@@ -35,10 +29,6 @@ export async function handleCancelJob(
   apiKeyId: string,
   apiClient: ApiClient,
 ): Promise<Response> {
-  if (!JOB_ID_RE.test(jobId)) {
-    return jsonError(400, "BAD_REQUEST", "invalid job id format");
-  }
-
   const outcome = await cancelAgentJob(jobId, apiKeyId);
   // Wrong-owner and missing both return 404 so probes can't enumerate jobs.
   if (outcome.status === "not_found") {
