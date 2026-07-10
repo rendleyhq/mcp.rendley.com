@@ -139,10 +139,7 @@ async function pollExport(apiClient: ApiClient, exportId: string) {
   };
 }
 
-export function registerExportTools(
-  server: McpServer,
-  apiClient: ApiClient,
-) {
+export function registerExportTools(server: McpServer, apiClient: ApiClient) {
   server.registerTool(
     "export_project",
     {

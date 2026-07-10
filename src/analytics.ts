@@ -6,12 +6,13 @@ import { log, scrubUrls } from "@/logger";
 //
 // Safety contract:
 // - NO-OP when POSTHOG_API_KEY is absent (mirrors how the rest of the app gates
-//   optional infra). analyticsEnabled() reflects that.
+//   optional infra).
 // - Never throws into a caller: every entrypoint is wrapped so an analytics
 //   failure can never break a tool call.
-// - Never capture secrets/tokens. `surface` is stamped on every event;
-//   callers pass only safe props (tool_name, project_id, duration_ms, reason,
-//   error, plan). Free-form error strings are scrubbed of tokenized URLs.
+// - Product-relevant props only: bounded, low-cardinality values (tool_name,
+//   project_id, duration_ms, reason, error_code, plan). Raw error messages,
+//   stack traces and URLs are diagnostics — they belong in the logs (OTel), not
+//   here. sanitizeProps still scrubs tokenized URLs as a defensive backstop.
 
 const SOURCE_SURFACE = "mcp";
 const DEFAULT_HOST = "https://analytics.rendley.com";
@@ -27,8 +28,9 @@ if (apiKey) {
   try {
     client = new PostHog(apiKey, {
       host,
-      // Short-lived request handlers batch a few events; keep the batch small and
-      // the interval tight so events aren't stranded on a mostly-idle server.
+      // These match posthog-node's defaults. The request path flushes manually
+      // (flushAnalytics), so request events don't wait on the interval; background
+      // events (agent-runner) rely on the interval + the shutdown flush.
       flushAt: 20,
       flushInterval: 10_000,
       // No personal API key here, so no feature-flag polling — but be explicit.
@@ -41,10 +43,6 @@ if (apiKey) {
       err: err instanceof Error ? err.message : String(err),
     });
   }
-}
-
-export function analyticsEnabled(): boolean {
-  return client !== null;
 }
 
 // Scrub any free-form string prop that could carry a tokenized URL (e.g. an error
@@ -67,7 +65,8 @@ export function capture(
     client.capture({
       distinctId,
       event,
-      properties: { surface: SOURCE_SURFACE, ...sanitizeProps(props) },
+      // surface stamped last so a caller-supplied `surface` prop can't override it.
+      properties: { ...sanitizeProps(props), surface: SOURCE_SURFACE },
     });
   } catch (err) {
     log.warn("analytics_capture_failed", {
@@ -85,7 +84,7 @@ export function identifyUser(
   try {
     client.identify({
       distinctId,
-      properties: { surface: SOURCE_SURFACE, ...sanitizeProps(props) },
+      properties: { ...sanitizeProps(props), surface: SOURCE_SURFACE },
     });
   } catch (err) {
     log.warn("analytics_identify_failed", {

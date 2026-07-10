@@ -42,18 +42,6 @@ export async function runAgentJob(input: RunInput): Promise<Job | null> {
     component: "agentRunner",
   });
 
-  // Product analytics for the agent run. All emissions are guarded and best-effort
-  // so they can never affect the job outcome. duration_ms is measured from the
-  // point the run is marked Running (agent_run_started) to a terminal state.
-  const runStartedAt = Date.now();
-  const trackAgent = (event: string, extra: Record<string, unknown> = {}) => {
-    capture(input.distinctId, event, {
-      project_id: input.projectId,
-      ...(input.plan ? { plan: input.plan } : {}),
-      ...extra,
-    });
-  };
-
   const progressRing: string[] = [];
   const progress = async (message: string): Promise<void> => {
     progressRing.push(message);
@@ -89,7 +77,6 @@ export async function runAgentJob(input: RunInput): Promise<Job | null> {
     }
 
     await updateJob(input.jobId, { status: JobStatus.Running });
-    trackAgent("mcp.agent_run_started");
 
     const sessionToken = await new ApiClient({
       baseUrl: config.apiBaseUrl,
@@ -112,8 +99,11 @@ export async function runAgentJob(input: RunInput): Promise<Job | null> {
 
     switch (outcome.kind) {
       case "completed":
-        trackAgent("mcp.agent_run_completed", {
-          duration_ms: Date.now() - runStartedAt,
+        // The one MCP agent product signal: the user got their edited video.
+        // Attempts come from mcp.tool_called; failures/durations are observability.
+        capture(input.distinctId, "mcp.agent_run_completed", {
+          project_id: input.projectId,
+          ...(input.plan ? { plan: input.plan } : {}),
         });
         return await updateJob(input.jobId, {
           status: JobStatus.Completed,
@@ -128,9 +118,6 @@ export async function runAgentJob(input: RunInput): Promise<Job | null> {
         });
 
       case "save_failed":
-        trackAgent("mcp.agent_run_failed", {
-          error: `save not confirmed: ${outcome.saveStatus}`,
-        });
         return await updateJob(input.jobId, {
           status: JobStatus.Failed,
           last_message: outcome.lastMessage,
@@ -143,9 +130,6 @@ export async function runAgentJob(input: RunInput): Promise<Job | null> {
         });
 
       case "timeout":
-        trackAgent("mcp.agent_run_failed", {
-          error: `agent exceeded ${maxWaitMs}ms timeout`,
-        });
         return await updateJob(input.jobId, {
           status: JobStatus.Failed,
           last_message: outcome.lastMessage,
@@ -158,7 +142,6 @@ export async function runAgentJob(input: RunInput): Promise<Job | null> {
         });
 
       case "error":
-        trackAgent("mcp.agent_run_failed", { error: outcome.error });
         return await updateJob(input.jobId, {
           status: JobStatus.Failed,
           last_message: outcome.lastMessage,
@@ -171,9 +154,6 @@ export async function runAgentJob(input: RunInput): Promise<Job | null> {
         });
 
       case "interrupt":
-        trackAgent("mcp.agent_run_failed", {
-          error: `unexpected interrupt: ${outcome.status.interruptType ?? "unknown"}`,
-        });
         return await updateJob(input.jobId, {
           status: JobStatus.Failed,
           last_message: outcome.lastMessage,
@@ -191,12 +171,10 @@ export async function runAgentJob(input: RunInput): Promise<Job | null> {
   } catch (err) {
     if (input.signal?.aborted) {
       logger.info("cancelled");
-      trackAgent("mcp.agent_run_failed", { error: "cancelled" });
       return await markCancelled();
     }
     if (err instanceof BrowserBusyError) {
       logger.warn("browser_busy", { err });
-      trackAgent("mcp.agent_run_failed", { error: "at_capacity" });
       return await updateJob(input.jobId, {
         status: JobStatus.Failed,
         error: "browser worker at capacity",
@@ -209,9 +187,6 @@ export async function runAgentJob(input: RunInput): Promise<Job | null> {
       });
     }
     logger.error("failed", { err });
-    trackAgent("mcp.agent_run_failed", {
-      error: err instanceof Error ? err.message : String(err),
-    });
     return await updateJob(input.jobId, {
       status: JobStatus.Failed,
       error: err instanceof Error ? err.message : String(err),
