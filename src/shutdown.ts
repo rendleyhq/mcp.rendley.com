@@ -1,6 +1,7 @@
 // Shutdown order must hold: stop HTTP, then drain in-flight jobs.
 import { jobQueue } from "@/queue";
 import { failInterruptedJobs } from "@/jobs/index";
+import { shutdownAnalytics } from "@/analytics";
 import { log } from "@/logger";
 
 interface ClosableServer {
@@ -59,6 +60,9 @@ async function gracefulShutdown(
   } catch (err) {
     log.error("shutdown_fail_jobs_error", { err });
   }
+
+  // Flush any buffered product-analytics events before the process exits.
+  await shutdownAnalytics();
 
   log.info("shutdown_complete");
 }

@@ -15,7 +15,12 @@ import { registerAgentTools } from "@/tools/agent";
 import { registerExportTools } from "@/tools/export";
 import { registerBrandkitTools } from "@/tools/brandkit";
 import { registerUploadTools } from "@/tools/uploads";
-import { isPaidPlan } from "@/plan";
+import { resolvePlanInfo } from "@/plan";
+import {
+  capture,
+  identifyUser,
+  flushAnalytics,
+} from "@/analytics";
 import { fail } from "@/response";
 import { handleStartAgentJob } from "@/http/agent";
 import { handleGetJob, handleCancelJob } from "@/http/jobs";
@@ -192,6 +197,66 @@ function installFreePlanPaywall(server: McpServer): void {
   ) => register(name, config, async () => fail(FREE_PLAN_PAYWALL_MESSAGE));
 }
 
+// Wraps every tool handler to emit `mcp.tool_called` (product analytics) before
+// the real handler runs. Installed BEFORE installFreePlanPaywall so it wraps the
+// final callback (real handler or paywall prompt), meaning tool calls are tracked
+// on free plans too. Analytics is fully guarded and can never break a tool call.
+function installToolCallTracking(
+  server: McpServer,
+  distinctId: string,
+  plan: string,
+): void {
+  const register = server.registerTool.bind(server) as (
+    name: string,
+    config: unknown,
+    cb: (...args: unknown[]) => unknown,
+  ) => unknown;
+  (server as unknown as { registerTool: typeof register }).registerTool = (
+    name,
+    config,
+    cb,
+  ) =>
+    register(name, config, (...args: unknown[]) => {
+      capture(distinctId, "mcp.tool_called", { tool_name: name, plan });
+      // Mark users of the core edit_video tool as a durable person property so
+      // they can be cohorted/segmented directly, not just via an event filter.
+      if (name === "edit_video") {
+        identifyUser(distinctId, {
+          used_mcp_edit_video: true,
+          last_mcp_edit_video_at: new Date().toISOString(),
+        });
+      }
+      return cb(...args);
+    });
+}
+
+// Peek (via a clone, so the original body is untouched for the transport) to see
+// if this POST is the JSON-RPC `initialize` that opens an MCP session, so we can
+// emit `mcp.session_started`. client_name / protocol_version are optional.
+async function peekInitialize(
+  req: Request,
+): Promise<{ clientName: string | null; protocolVersion: string | null } | null> {
+  if (req.method !== "POST") return null;
+  try {
+    const text = await req.clone().text();
+    const parsed = JSON.parse(text) as unknown;
+    const msg = (Array.isArray(parsed) ? parsed[0] : parsed) as
+      | { method?: string; params?: Record<string, unknown> }
+      | undefined;
+    if (msg?.method !== "initialize") return null;
+    const clientInfo = msg.params?.clientInfo as
+      | { name?: string }
+      | undefined;
+    return {
+      clientName: clientInfo?.name ?? null,
+      protocolVersion:
+        (msg.params?.protocolVersion as string | undefined) ?? null,
+    };
+  } catch {
+    return null;
+  }
+}
+
 async function handleMCPRequest(c: Context<AppEnv>): Promise<Response> {
   const apiClient = c.get("apiClient");
 
@@ -205,8 +270,29 @@ async function handleMCPRequest(c: Context<AppEnv>): Promise<Response> {
 
   const userId = c.get("userId");
 
+  // One /users/me read serves both paywall gating and the analytics plan label.
+  const planInfo = await resolvePlanInfo(apiClient);
+  const { planName } = planInfo;
+
+  // Product analytics: track every tool call (installed before the paywall so it
+  // still fires when a free plan gets the upgrade-prompt handler).
+  installToolCallTracking(server, userId, planName);
+
+  // Product analytics: a fresh MCP session (the JSON-RPC `initialize` request).
+  const init = await peekInitialize(c.req.raw);
+  if (init) {
+    capture(userId, "mcp.session_started", {
+      plan: planName,
+      ...(init.clientName ? { client_name: init.clientName } : {}),
+      ...(init.protocolVersion
+        ? { protocol_version: init.protocolVersion }
+        : {}),
+    });
+    identifyUser(userId, { plan_name: planName });
+  }
+
   // Paid-only: free plans get every tool call answered with an upgrade prompt.
-  if (!(await isPaidPlan(apiClient))) {
+  if (!planInfo.isPaid) {
     installFreePlanPaywall(server);
   }
 
@@ -217,6 +303,7 @@ async function handleMCPRequest(c: Context<AppEnv>): Promise<Response> {
     userId,
     apiKey: c.get("apiKey"),
     apiKeyId: c.get("apiKeyId"),
+    plan: planName,
   });
   registerExportTools(server, apiClient);
   registerBrandkitTools(server, apiClient);
@@ -227,7 +314,11 @@ async function handleMCPRequest(c: Context<AppEnv>): Promise<Response> {
   });
 
   await server.connect(transport);
-  return transport.handleRequest(withMcpAccept(c.req.raw));
+  const response = await transport.handleRequest(withMcpAccept(c.req.raw));
+  // posthog-node batches; nudge a flush so short-lived handlers don't strand
+  // events. Fire-and-forget — never block or fail the response on analytics.
+  void flushAnalytics();
+  return response;
 }
 
 const server = Bun.serve({

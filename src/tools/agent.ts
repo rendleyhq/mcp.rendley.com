@@ -19,6 +19,7 @@ import {
   SLOT_WAIT_TIMEOUT_MS,
 } from "@/concurrency-limits";
 import { resolveMcpMaxConcurrent } from "@/plan";
+import { capture } from "@/analytics";
 import { recordQueueFullRejected } from "@/metrics";
 import { log } from "@/logger";
 import type { BridgeAttachment } from "@/types/bridge.types";
@@ -263,10 +264,12 @@ export interface AgentToolDeps {
   userId: string;
   apiKey: string;
   apiKeyId: string;
+  // Best-effort plan label for product analytics. Optional/backward-compatible.
+  plan?: string;
 }
 
 export function registerAgentTools(server: McpServer, deps: AgentToolDeps) {
-  const { apiClient, userId, apiKey, apiKeyId } = deps;
+  const { apiClient, userId, apiKey, apiKeyId, plan } = deps;
 
   server.registerTool(
     "edit_video",
@@ -358,6 +361,10 @@ export function registerAgentTools(server: McpServer, deps: AgentToolDeps) {
       // cap makes a request wait for a run slot (below), it doesn't turn it away.
       if (!tryReserveTask()) {
         recordQueueFullRejected();
+        capture(userId, "mcp.queue_rejected", {
+          reason: "queue_full",
+          ...(plan ? { plan } : {}),
+        });
         logger.warn("pending_cap_reached_edit_video_rejected");
         return fail(
           "The video editor has a lot of edits queued right now. Please retry in a few seconds.",
@@ -456,6 +463,8 @@ export function registerAgentTools(server: McpServer, deps: AgentToolDeps) {
                 attachments: remoteAttachments,
                 threadId: resolvedThreadId,
                 signal: abort.signal,
+                distinctId: userId,
+                plan,
               }),
             );
           } catch (err) {
