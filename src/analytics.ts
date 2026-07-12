@@ -1,4 +1,5 @@
 import { PostHog } from "posthog-node";
+import { AnalyticsEvent } from "@/analytics.types";
 import { log, scrubUrls } from "@/logger";
 
 const SOURCE_SURFACE = "mcp";
@@ -38,7 +39,7 @@ function sanitizeProps(props: Props): Props {
 
 export function capture(
   userId: string | undefined | null,
-  event: string,
+  event: AnalyticsEvent,
   props: Props = {},
 ): void {
   if (!client || !userId) return;

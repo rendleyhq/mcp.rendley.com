@@ -20,6 +20,7 @@ import {
 } from "@/concurrency-limits";
 import { resolveMcpMaxConcurrent } from "@/plan";
 import { capture } from "@/analytics";
+import { AnalyticsEvent } from "@/analytics.types";
 import { recordQueueFullRejected } from "@/metrics";
 import { log } from "@/logger";
 import type { BridgeAttachment } from "@/types/bridge.types";
@@ -412,7 +413,7 @@ export function registerAgentTools(server: McpServer, deps: AgentToolDeps) {
           files: remoteAttachments.length,
         });
 
-        capture(userId, "mcp.edit_video", {
+        capture(userId, AnalyticsEvent.EDIT_VIDEO, {
           project_id,
           ...(plan ? { plan } : {}),
         });
