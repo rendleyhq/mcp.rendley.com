@@ -9,8 +9,7 @@ const FALLBACK_MAX_CONCURRENT = 3;
 export interface PlanInfo {
   isPaid: boolean;
   maxConcurrent: number;
-  // Best-effort plan label for analytics (subscription.plan_name, or "free" when
-  // unsubscribed, or "unknown" when /users/me couldn't be read). Never a secret.
+  // "free" when unsubscribed, "unknown" when /users/me couldn't be read.
   planName: string;
 }
 

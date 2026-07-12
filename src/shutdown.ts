@@ -61,7 +61,6 @@ async function gracefulShutdown(
     log.error("shutdown_fail_jobs_error", { err });
   }
 
-  // Flush any buffered product-analytics events before the process exits.
   await shutdownAnalytics();
 
   log.info("shutdown_complete");

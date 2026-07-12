@@ -3,7 +3,6 @@ import { config, headlessProjectUrl } from "@/config";
 import { getAgentBrowser } from "@/sdk/browser-factory";
 import { BrowserBusyError } from "@/sdk/remote-browser";
 import { updateJob } from "@/jobs/index";
-import { capture } from "@/analytics";
 import { log } from "@/logger";
 import type { BridgeAttachment } from "@/types/bridge.types";
 import type { Job } from "@/types/jobs.types";
@@ -25,10 +24,6 @@ interface RunInput {
   onProgress?: (message: string) => void | Promise<void>;
   // Aborts the browser-worker run (user cancel / explicit cancel endpoint).
   signal?: AbortSignal;
-  // Product analytics (optional/backward-compatible): distinct_id = Rendley user
-  // id, plus the best-effort plan label. When absent, no agent events are emitted.
-  distinctId?: string;
-  plan?: string;
 }
 
 // Runs the browser-mediated agent edit and writes the terminal state to the
@@ -99,12 +94,6 @@ export async function runAgentJob(input: RunInput): Promise<Job | null> {
 
     switch (outcome.kind) {
       case "completed":
-        // The one MCP agent product signal: the user got their edited video.
-        // Attempts come from mcp.tool_called; failures/durations are observability.
-        capture(input.distinctId, "mcp.agent_run_completed", {
-          project_id: input.projectId,
-          ...(input.plan ? { plan: input.plan } : {}),
-        });
         return await updateJob(input.jobId, {
           status: JobStatus.Completed,
           last_message: outcome.lastMessage,

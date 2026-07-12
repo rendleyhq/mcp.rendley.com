@@ -264,7 +264,6 @@ export interface AgentToolDeps {
   userId: string;
   apiKey: string;
   apiKeyId: string;
-  // Best-effort plan label for product analytics. Optional/backward-compatible.
   plan?: string;
 }
 
@@ -361,10 +360,6 @@ export function registerAgentTools(server: McpServer, deps: AgentToolDeps) {
       // cap makes a request wait for a run slot (below), it doesn't turn it away.
       if (!tryReserveTask()) {
         recordQueueFullRejected();
-        capture(userId, "mcp.queue_rejected", {
-          reason: "queue_full",
-          ...(plan ? { plan } : {}),
-        });
         logger.warn("pending_cap_reached_edit_video_rejected");
         return fail(
           "The video editor has a lot of edits queued right now. Please retry in a few seconds.",
@@ -417,6 +412,11 @@ export function registerAgentTools(server: McpServer, deps: AgentToolDeps) {
           files: remoteAttachments.length,
         });
 
+        capture(userId, "mcp.edit_video", {
+          project_id,
+          ...(plan ? { plan } : {}),
+        });
+
         const abort = registerJobAbort(job.job_id);
 
         // The plan's concurrent-run cap and the one-edit-per-project lock are
@@ -463,8 +463,6 @@ export function registerAgentTools(server: McpServer, deps: AgentToolDeps) {
                 attachments: remoteAttachments,
                 threadId: resolvedThreadId,
                 signal: abort.signal,
-                distinctId: userId,
-                plan,
               }),
             );
           } catch (err) {
