@@ -220,7 +220,6 @@ async function handleMCPRequest(c: Context<AppEnv>): Promise<Response> {
     userId,
     apiKey: c.get("apiKey"),
     apiKeyId: c.get("apiKeyId"),
-    plan: planInfo.planName,
   });
   registerExportTools(server, apiClient);
   registerBrandkitTools(server, apiClient);

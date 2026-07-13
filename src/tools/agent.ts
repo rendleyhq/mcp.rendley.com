@@ -265,11 +265,10 @@ export interface AgentToolDeps {
   userId: string;
   apiKey: string;
   apiKeyId: string;
-  plan?: string;
 }
 
 export function registerAgentTools(server: McpServer, deps: AgentToolDeps) {
-  const { apiClient, userId, apiKey, apiKeyId, plan } = deps;
+  const { apiClient, userId, apiKey, apiKeyId } = deps;
 
   server.registerTool(
     "edit_video",
@@ -413,10 +412,7 @@ export function registerAgentTools(server: McpServer, deps: AgentToolDeps) {
           files: remoteAttachments.length,
         });
 
-        capture(userId, AnalyticsEvent.EDIT_VIDEO, {
-          project_id,
-          ...(plan ? { plan } : {}),
-        });
+        capture(userId, AnalyticsEvent.EDIT_VIDEO, { project_id });
 
         const abort = registerJobAbort(job.job_id);
 
