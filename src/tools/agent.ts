@@ -19,6 +19,8 @@ import {
   SLOT_WAIT_TIMEOUT_MS,
 } from "@/concurrency-limits";
 import { resolveMcpMaxConcurrent } from "@/plan";
+import { capture } from "@/analytics";
+import { AnalyticsEvent } from "@/analytics.types";
 import { recordQueueFullRejected } from "@/metrics";
 import { log } from "@/logger";
 import type { BridgeAttachment } from "@/types/bridge.types";
@@ -409,6 +411,8 @@ export function registerAgentTools(server: McpServer, deps: AgentToolDeps) {
           threadId: resolvedThreadId,
           files: remoteAttachments.length,
         });
+
+        capture(userId, AnalyticsEvent.EDIT_VIDEO, { project_id });
 
         const abort = registerJobAbort(job.job_id);
 
