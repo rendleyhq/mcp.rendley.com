@@ -15,6 +15,10 @@ import { registerAgentTools } from "@/tools/agent";
 import { registerExportTools } from "@/tools/export";
 import { registerBrandkitTools } from "@/tools/brandkit";
 import { registerUploadTools } from "@/tools/uploads";
+import {
+  registerMotionGraphicsTools,
+  MOTION_GRAPHICS_TOOL_NAMES,
+} from "@/tools/motion-graphics";
 import { isPaidPlan } from "@/plan";
 import { fail } from "@/response";
 import { handleStartAgentJob } from "@/http/agent";
@@ -175,10 +179,16 @@ function withMcpAccept(req: Request): Request {
 const FREE_PLAN_PAYWALL_MESSAGE =
   "The Rendley MCP is available on paid plans. Let the user know they need to upgrade at https://app.rendley.com to create or edit videos from their assistant, then stop — do not retry.";
 
+// Tools that stay usable on free plans: motion graphics are authored by the
+// user's own assistant (their Claude/ChatGPT subscription) and cost 0 Rendley
+// credits, so they're exempt from the paid-plan paywall.
+const PAYWALL_EXEMPT_TOOLS = new Set<string>(MOTION_GRAPHICS_TOOL_NAMES);
+
 // Keeps every tool listed (so the assistant sees what's possible) but swaps each
 // handler for an upgrade prompt. Used for free plans: the MCP is a paid feature,
 // but a soft paywall lets the assistant nudge the user rather than failing to
 // connect. Wrap before registering so all tools are covered in one place.
+// Exempt tools keep their real handler.
 function installFreePlanPaywall(server: McpServer): void {
   const register = server.registerTool.bind(server) as (
     name: string,
@@ -188,8 +198,11 @@ function installFreePlanPaywall(server: McpServer): void {
   (server as unknown as { registerTool: typeof register }).registerTool = (
     name,
     config,
-    _cb,
-  ) => register(name, config, async () => fail(FREE_PLAN_PAYWALL_MESSAGE));
+    cb,
+  ) =>
+    PAYWALL_EXEMPT_TOOLS.has(name)
+      ? register(name, config, cb)
+      : register(name, config, async () => fail(FREE_PLAN_PAYWALL_MESSAGE));
 }
 
 async function handleMCPRequest(c: Context<AppEnv>): Promise<Response> {
@@ -221,6 +234,12 @@ async function handleMCPRequest(c: Context<AppEnv>): Promise<Response> {
   registerExportTools(server, apiClient);
   registerBrandkitTools(server, apiClient);
   registerUploadTools(server, apiClient);
+  registerMotionGraphicsTools(server, {
+    apiClient,
+    userId,
+    apiKey: c.get("apiKey"),
+    apiKeyId: c.get("apiKeyId"),
+  });
 
   const transport = new WebStandardStreamableHTTPServerTransport({
     sessionIdGenerator: undefined,

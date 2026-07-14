@@ -9,6 +9,7 @@ export enum JobStatus {
 export enum JobKind {
   Agent = "agent",
   Export = "export",
+  MotionGraphic = "motion_graphic",
 }
 
 export interface Job {

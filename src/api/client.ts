@@ -22,6 +22,10 @@ export interface Project {
   thumbnail_url: string;
   created_at: string;
   updated_at: string;
+  // The serialized editor document. Present on GET /projects/:id (single),
+  // blanked on the list endpoint. Opaque except for a few known keys
+  // (timeline.layers[].clips[], library.media[], display).
+  project_json?: string;
 }
 
 export interface UploadLookupResponse {
@@ -316,6 +320,31 @@ export class ApiClient {
 
   async delete(path: string): Promise<void> {
     await this.request(path, { method: "DELETE" });
+  }
+
+  // Wrap externally-authored motion-clip userCode into the full worker script the
+  // editor expects. Pure server-side string assembly — no LLM, no credits.
+  async buildMotionClipScript(userCode: string): Promise<string> {
+    const res = await this.post<{ script: string }>(
+      "/agent/motion-clip/build-script",
+      { user_code: userCode },
+    );
+    return res.script;
+  }
+
+  // Strip a full stored worker script back to its editable userCode.
+  async extractMotionClipUserCode(script: string): Promise<string> {
+    const res = await this.post<{ user_code: string }>(
+      "/agent/motion-clip/extract-usercode",
+      { script },
+    );
+    return res.user_code;
+  }
+
+  // Canonical authoring guide (code rules + design guide) an external author must
+  // follow so its motion-clip userCode is compatible with the editor.
+  async getMotionClipGuide(): Promise<{ code_rules: string; design_guide: string }> {
+    return this.get<{ code_rules: string; design_guide: string }>("/agent/motion-clip/guide");
   }
 
   async listWorkspaces(): Promise<Workspace[]> {

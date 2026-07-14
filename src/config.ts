@@ -46,6 +46,10 @@ const defaults = {
   // only hard rejection — per-tenant caps make requests wait, not fail.
   queueMaxQueued: 2000,
   agentTimeoutMs: 8 * 60 * 1000,
+  // Hard cap on a single motion-clip apply op (add/update/keyframes) once the
+  // editor page is ready. Backstop so a hanging worker script can't wedge the
+  // session, the per-project lock, and the browser.
+  motionOpTimeoutMs: 60 * 1000,
   browserRecycleAfter: 8,
   chromiumJsHeapMb: 512,
   headless: true,
@@ -88,6 +92,7 @@ const EnvSchema = z.object({
   QUEUE_MAX_QUEUED: intSchema(defaults.queueMaxQueued),
   BROWSER_RECYCLE_AFTER: intSchema(defaults.browserRecycleAfter),
   AGENT_TIMEOUT_MS: intSchema(defaults.agentTimeoutMs),
+  MOTION_OP_TIMEOUT_MS: intSchema(defaults.motionOpTimeoutMs),
   // Abort a worker run if no stream event (progress, result, or ping heartbeat)
   // arrives within this window, instead of waiting out the full run deadline.
   WORKER_STALL_TIMEOUT_MS: intSchema(60 * 1000),
@@ -121,6 +126,7 @@ export const config = {
   queueMaxQueued: env.QUEUE_MAX_QUEUED,
   browserRecycleAfter: env.BROWSER_RECYCLE_AFTER,
   agentTimeoutMs: env.AGENT_TIMEOUT_MS,
+  motionOpTimeoutMs: env.MOTION_OP_TIMEOUT_MS,
   workerStallTimeoutMs: env.WORKER_STALL_TIMEOUT_MS,
   chromiumJsHeapMb: env.CHROMIUM_JS_HEAP_MB,
   headless: env.HEADLESS,

@@ -65,6 +65,76 @@ export interface BridgeExportResult {
 
 export type FlushSaveResult = { status: "synced" | "timeout" | "error" };
 
+// --- Motion graphics (direct MotionClip control, no agent) ---
+
+export interface BridgeMotionClipResource {
+  id: string;
+  type?: string;
+  label?: string;
+  mediaId?: string;
+  blobUrl?: string;
+  grabUrl?: string;
+  fit?: "cover" | "contain" | "fill" | "none" | "scale-down";
+  offsetX?: number;
+  offsetY?: number;
+  family?: string;
+  css?: string;
+}
+
+export interface BridgeMotionClipProperty {
+  name: string;
+  type: string;
+  value: unknown;
+}
+
+export interface BridgeOpResult {
+  ok: boolean;
+  error?: string;
+}
+
+export interface BridgeMotionGraphicResult extends BridgeOpResult {
+  clipId?: string;
+  properties?: BridgeMotionClipProperty[];
+}
+
+export interface BridgeMotionGraphicInfo {
+  clipId: string;
+  name: string;
+  script: string;
+  properties: BridgeMotionClipProperty[];
+  resources: BridgeMotionClipResource[];
+  width: number;
+  height: number;
+  duration: number;
+  startTime: number;
+}
+
+export interface BridgeMotionGraphicSummary {
+  clipId: string;
+  name: string;
+  startTime: number;
+  duration: number;
+}
+
+export interface BridgeMotionKeyframe {
+  time: number;
+  value: number | number[] | string | boolean;
+  handleIn?: { time: number; value: number };
+  handleOut?: { time: number; value: number };
+  hold?: boolean;
+}
+
+export interface BridgeAddMotionGraphicOptions {
+  script: string;
+  duration: number;
+  width?: number;
+  height?: number;
+  startTime?: number;
+  layerId?: string;
+  name?: string;
+  resources?: BridgeMotionClipResource[];
+}
+
 export interface RendleyAgentWindowApi {
   sendMessage: (
     message: string,
@@ -77,6 +147,29 @@ export interface RendleyAgentWindowApi {
   // Bridge v2: direct save awaiting the actual PATCH. Optional on older builds.
   saveNow?: (timeoutMs?: number) => Promise<FlushSaveResult>;
   exportProject: (config?: BridgeExportConfig) => Promise<BridgeExportResult>;
+  // Motion graphics — direct MotionClip control (optional: only newer editor
+  // builds expose them; wrappers guard and surface a clear error if absent).
+  addMotionGraphic?: (
+    options: BridgeAddMotionGraphicOptions,
+  ) => Promise<BridgeMotionGraphicResult>;
+  updateMotionGraphicScript?: (
+    clipId: string,
+    options: { script: string; resources?: BridgeMotionClipResource[] },
+  ) => Promise<BridgeMotionGraphicResult>;
+  setMotionGraphicProperty?: (
+    clipId: string,
+    property: string,
+    value: unknown,
+  ) => Promise<BridgeOpResult>;
+  getMotionGraphic?: (clipId: string) => Promise<BridgeMotionGraphicInfo | null>;
+  listMotionGraphics?: () => BridgeMotionGraphicSummary[];
+  setMotionGraphicKeyframes?: (
+    clipId: string,
+    property: string,
+    keyframes: BridgeMotionKeyframe[],
+    reset?: boolean,
+  ) => Promise<BridgeOpResult>;
+  getMotionGraphicKeyframes?: (clipId: string) => Promise<string>;
 }
 
 declare global {
