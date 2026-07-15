@@ -351,21 +351,26 @@ export class ApiClient {
     return this.get<Workspace[]>("/workspaces");
   }
 
-  async createWorkspace(input: { name: string }): Promise<Workspace> {
-    return this.post<Workspace>("/workspaces", { name: input.name });
+  async getWorkspace(workspaceId: string): Promise<Workspace> {
+    return this.get<Workspace>(`/workspaces/${encodeURIComponent(workspaceId)}`);
   }
 
   /**
-   * Return an existing workspace id, or create one if the user has none.
-   * Workspaces are provisioned client-side, so a user reaching the MCP may
-   * not have one yet — projects can't exist without a workspace.
+   * Resolve the workspace a project should attach to: the explicit id when
+   * given, otherwise the user's oldest workspace (GET /workspaces returns
+   * oldest-first and the backend guarantees every account has at least one),
+   * so the project lands where the dashboard is actually looking. Never
+   * creates a workspace.
    */
-  async resolveOrCreateWorkspace(workspaceId?: string): Promise<string> {
-    if (workspaceId && workspaceId.trim() !== "") return workspaceId;
+  async resolveWorkspace(workspaceId?: string): Promise<Workspace> {
+    if (workspaceId && workspaceId.trim() !== "") {
+      return this.getWorkspace(workspaceId);
+    }
     const workspaces = await this.listWorkspaces();
-    if (workspaces.length > 0) return workspaces[0].id;
-    const workspace = await this.createWorkspace({ name: "My workspace" });
-    return workspace.id;
+    if (workspaces.length === 0) {
+      throw new Error("This account has no workspace yet. Open app.rendley.com once to finish setup.");
+    }
+    return workspaces[0];
   }
 
   async listProjects(workspaceId: string): Promise<Project[]> {
@@ -523,12 +528,12 @@ export class ApiClient {
   ): Promise<string> {
     if (projectId && projectId.trim() !== "") return projectId;
 
-    const workspaceId = await this.resolveOrCreateWorkspace();
+    const workspace = await this.resolveWorkspace();
 
     const name = (opts.prompt ?? "").trim().slice(0, 80) || "Agent job";
     const project = await this.createProject({
       name,
-      workspaceId,
+      workspaceId: workspace.id,
     });
     return project.id;
   }

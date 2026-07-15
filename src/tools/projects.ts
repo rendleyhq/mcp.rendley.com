@@ -162,7 +162,7 @@ export function registerProjectTools(server: McpServer, apiClient: ApiClient) {
     {
       title: "Create project",
       description:
-        "Create a new video project. Defaults to the user's first workspace unless you pass one, and creates a workspace automatically if the user has none.",
+        "Create a new video project. Defaults to the user's oldest workspace unless you pass one.",
       inputSchema: {
         name: z.string().min(1).max(256).describe("Name for the project"),
         workspace_id: z
@@ -180,14 +180,11 @@ export function registerProjectTools(server: McpServer, apiClient: ApiClient) {
     },
     async ({ name, workspace_id }) => {
       try {
-        // A project can't exist without a workspace. Workspaces are provisioned
-        // client-side now, so the user may not have one yet — create one on the
-        // fly rather than failing.
-        const wsId = await apiClient.resolveOrCreateWorkspace(workspace_id);
+        const workspace = await apiClient.resolveWorkspace(workspace_id);
 
         const project = await apiClient.createProject({
           name,
-          workspaceId: wsId,
+          workspaceId: workspace.id,
         });
 
         return {
@@ -195,19 +192,21 @@ export function registerProjectTools(server: McpServer, apiClient: ApiClient) {
             {
               type: "text" as const,
               text:
-                `Created **${project.name}** (project_id: \`${project.id}\`)\n\n` +
-                "This project_id identifies the project for follow-up calls such as edit_video and export_project.",
+                `Created **${project.name}** (project_id: \`${project.id}\`) in workspace **${workspace.name}** (workspace_id: \`${workspace.id}\`).\n\n` +
+                "This project_id identifies the project for follow-up calls such as edit_video and export_project. " +
+                "If the user's dashboard shows a different workspace, tell them which workspace the project landed in.",
             },
           ],
           structuredContent: {
             project: {
               id: project.id,
               name: project.name,
-              workspace_id: wsId,
+              workspace_id: workspace.id,
               fit_duration: project.fit_duration,
               created_at: project.created_at,
               updated_at: project.updated_at,
             },
+            workspace: { id: workspace.id, name: workspace.name },
           },
         };
       } catch (err) {

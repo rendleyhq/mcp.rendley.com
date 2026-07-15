@@ -167,6 +167,22 @@ export const bridge = {
     }, clipId)) as string | "__MISSING__";
   },
 
+  // Returns a base64 data URI, or null on editor builds without captureFrame.
+  async captureFrame(
+    page: Page,
+    time: number,
+    quality?: number,
+  ): Promise<string | null> {
+    return (await page.evaluate(
+      async ({ t, q }) => {
+        const agent = window.__rendleyAgent;
+        if (!agent?.captureFrame) return null;
+        return await agent.captureFrame(t, q);
+      },
+      { t: time, q: quality },
+    )) as string | null;
+  },
+
   motionApiMissingError(): Error {
     return new Error(MISSING_MOTION_API_ERROR);
   },

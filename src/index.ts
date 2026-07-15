@@ -146,7 +146,9 @@ app.post("/v1/brandkit/assets", requireBearer, requirePaidPlan, (c) =>
 );
 
 // The single-use capability token in the path IS the auth, so no requireBearer.
-app.put("/v1/uploads/stream/:token", (c) =>
+// POST is accepted as an alias: LLM callers routinely POST despite the tool
+// text saying PUT, and the method mismatch used to surface as an opaque 404.
+app.on(["PUT", "POST"], "/v1/uploads/stream/:token", (c) =>
   handleStreamUpload(c.req.raw, c.req.param("token")),
 );
 

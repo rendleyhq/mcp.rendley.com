@@ -14,10 +14,10 @@ import { resolveMcpMaxConcurrent } from "@/plan";
 import { fail, formatError, outputAny } from "@/response";
 import type {
   BridgeMotionClipResource,
-  BridgeMotionGraphicResult,
   BridgeMotionKeyframe,
 } from "@/types/bridge.types";
 import type { Job } from "@/types/jobs.types";
+import type { MotionFrameCapture } from "@/types/motion.types";
 import { JobKind, JobStatus } from "@/types/jobs.types";
 
 const ID_RE = /^[A-Za-z0-9_-]{1,128}$/;
@@ -289,6 +289,9 @@ interface MotionOpOutcome {
   clip_id: string | null;
   properties: unknown;
   error: string | null;
+  // Rendered start/mid/end captures of the clip, so the authoring LLM can SEE
+  // the result. Returned as image content blocks, never in structuredContent.
+  frames: MotionFrameCapture[] | null;
 }
 
 function projectLink(url: string) {
@@ -329,6 +332,39 @@ function formatOperationLines(operations: MotionOpOutcome[]): string {
     .join("\n");
 }
 
+// At most this many operations get their frames attached to one response —
+// image blocks are heavy and clients render only so many usefully.
+const MAX_OPS_WITH_FRAMES = 3;
+
+// Keep base64 image data OUT of structuredContent (it's for data, not blobs);
+// frames travel as MCP image content blocks instead.
+function stripFrames(operations: MotionOpOutcome[]) {
+  return operations.map(({ frames: _frames, ...rest }) => rest);
+}
+
+function frameContentBlocks(operations: MotionOpOutcome[]) {
+  const blocks: Array<
+    { type: "text"; text: string } | { type: "image"; data: string; mimeType: string }
+  > = [];
+  const withFrames = operations.filter((op) => op.frames?.length).slice(0, MAX_OPS_WITH_FRAMES);
+  for (const op of withFrames) {
+    const frames = op.frames ?? [];
+    const blanks = frames.filter((f) => f.blank);
+    const times = frames.map((f) => `${f.time.toFixed(1)}s`).join(", ");
+    const warning = blanks.length
+      ? ` ⚠️ The clip appears BLANK at ${blanks.map((f) => `${f.time.toFixed(1)}s`).join(", ")} — check drawing coordinates, resource loading, and animation timing, then repair it with update_motion_graphic.`
+      : "";
+    blocks.push({
+      type: "text" as const,
+      text: `Rendered frames for ${op.label}${op.clip_id ? ` (clip \`${op.clip_id}\`)` : ""} at ${times}. Review them — if the output looks wrong or empty, fix the userCode via update_motion_graphic.${warning}`,
+    });
+    for (const frame of frames) {
+      blocks.push({ type: "image" as const, data: frame.jpegBase64, mimeType: "image/jpeg" });
+    }
+  }
+  return blocks;
+}
+
 export function formatMotionResult(job: Job) {
   const result = (job.result ?? {}) as {
     clip_id?: string;
@@ -350,13 +386,17 @@ export function formatMotionResult(job: Job) {
       text = `✅ Done.${result.clip_id ? ` Clip \`${result.clip_id}\`.` : ""}\n\nOpen project: ${url}`;
     }
     return {
-      content: [{ type: "text" as const, text }, projectLink(url)],
+      content: [
+        { type: "text" as const, text },
+        ...frameContentBlocks(operations),
+        projectLink(url),
+      ],
       structuredContent: {
         status: "completed" as const,
         job_id: job.job_id,
         clip_id: result.clip_id ?? null,
         properties: result.properties ?? null,
-        operations: operations.length ? operations : null,
+        operations: operations.length ? stripFrames(operations) : null,
         failed_count: failedOps.length,
       },
     };
@@ -374,7 +414,7 @@ export function formatMotionResult(job: Job) {
       status: job.status,
       job_id: job.job_id,
       error: job.error ?? null,
-      operations: operations.length ? operations : null,
+      operations: operations.length ? stripFrames(operations) : null,
     },
   };
 }
@@ -423,6 +463,7 @@ async function runMotionJob(
       clip_id: r.clipId ?? null,
       properties: r.properties ?? null,
       error: r.error ?? null,
+      frames: r.frames ?? null,
     }));
     const succeeded = operations.filter((op) => op.ok);
 
@@ -522,18 +563,17 @@ function buildCreateOp(input: CreateOpInput): MotionJobOp {
   return {
     kind: "create",
     label: `create ${input.name ? `"${input.name}"` : "motion graphic"}`,
-    run: (page) =>
-      bridge.addMotionGraphic(page, {
-        script: input.script,
-        duration: input.duration,
-        width: input.width,
-        height: input.height,
-        startTime: input.start_time,
-        layerId: input.layer_id,
-        name: input.name,
-        resources: input.resources,
-        skipSave: true,
-      }),
+    op: {
+      kind: "create",
+      script: input.script,
+      duration: input.duration,
+      width: input.width,
+      height: input.height,
+      startTime: input.start_time,
+      layerId: input.layer_id,
+      name: input.name,
+      resources: input.resources,
+    },
   };
 }
 
@@ -546,25 +586,12 @@ function buildUpdateOp(
   return {
     kind: "update",
     label: `update ${clipId}`,
-    run: async (page) => {
-      if (script) {
-        const r = await bridge.updateMotionGraphicScript(page, clipId, {
-          script,
-          resources,
-          skipSave: true,
-        });
-        if (r.error === "__MISSING_MOTION_API__" || !r.ok) return r;
-      }
-      const failed: string[] = [];
-      for (const [name, value] of propEntries) {
-        const r = await bridge.setMotionGraphicProperty(page, clipId, name, value, true);
-        if (r.error === "__MISSING_MOTION_API__") return r as BridgeMotionGraphicResult;
-        if (!r.ok) failed.push(`${name}: ${r.error ?? "failed"}`);
-      }
-      if (failed.length) {
-        return { ok: false, error: `Some properties could not be set: ${failed.join("; ")}` };
-      }
-      return { ok: true, clipId };
+    op: {
+      kind: "update",
+      clipId,
+      script,
+      properties: propEntries.map(([name, value]) => ({ name, value })),
+      resources,
     },
   };
 }
@@ -578,10 +605,7 @@ function buildKeyframesOp(
   return {
     kind: "set_keyframes",
     label: `keyframes ${property} on ${clipId}`,
-    run: (page) =>
-      bridge
-        .setMotionGraphicKeyframes(page, clipId, property, keyframes, reset, true)
-        .then((r) => ({ ...r, clipId })),
+    op: { kind: "set_keyframes", clipId, property, keyframes, reset },
   };
 }
 

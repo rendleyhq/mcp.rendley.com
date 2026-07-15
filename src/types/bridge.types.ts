@@ -175,6 +175,9 @@ export interface RendleyAgentWindowApi {
     skipSave?: boolean,
   ) => Promise<BridgeOpResult>;
   getMotionGraphicKeyframes?: (clipId: string) => Promise<string>;
+  // Seek + settle motion-clip workers + capture the canvas as a base64 data URI
+  // (JPEG). Time in seconds. Optional: only newer editor builds expose it.
+  captureFrame?: (time: number, quality?: number) => Promise<string>;
 }
 
 declare global {

@@ -1,12 +1,12 @@
-import type { Page } from "playwright";
-
 import { ApiClient } from "@/api/client";
 import { bridge } from "@/bridge/index";
+import { executeMotionOp } from "@/bridge/motion-executor";
 import { config, headlessProjectUrl } from "@/config";
 import { BrowserMode } from "@/constants";
 import { log } from "@/logger";
+import { runRemoteMotionSession } from "@/sdk/remote-motion";
 import { acquireEditorPage, releasePage } from "@/sdk/session";
-import type { BridgeMotionGraphicResult } from "@/types/bridge.types";
+import type { MotionOp, MotionOpResult } from "@/types/motion.types";
 
 interface MotionClipSessionInput {
   apiKey: string;
@@ -15,12 +15,12 @@ interface MotionClipSessionInput {
   save: boolean;
   // Called after each op settles — used as a job heartbeat (bumps updated_at so
   // a long multi-op batch isn't falsely marked orphaned) and for progress lines.
-  onOpDone?: (index: number, result: BridgeMotionGraphicResult) => void;
+  onOpDone?: (index: number, result: MotionOpResult) => void;
 }
 
 export interface MotionOpSpec {
   label: string;
-  run: (page: Page) => Promise<BridgeMotionGraphicResult>;
+  op: MotionOp;
 }
 
 // Hard bounds on the session stages that are otherwise unbounded at the
@@ -51,39 +51,48 @@ function withTimeout<T>(promise: Promise<T>, ms: number, message: string): Promi
 // single save for mutations, then tears the page down. Ops are independent: one
 // failing does not stop the rest — outcomes are returned positionally. This is
 // what makes batches cheap: N clips cost one browser launch + one save instead
-// of N of each.
+// of N of each. In remote mode the whole session runs on the browser worker
+// (POST /v1/motion-run), same contract, no local Chromium.
 export async function runMotionClipSession(
   input: MotionClipSessionInput,
   ops: MotionOpSpec[],
-): Promise<BridgeMotionGraphicResult[]> {
-  if (config.browserMode !== BrowserMode.Local) {
-    throw new Error(
-      "Motion-graphics tools currently require the local headless browser (BROWSER_MODE=local).",
-    );
-  }
-
-  const logger = log.child({ projectId: input.projectId, component: "motionClipRunner" });
-
+): Promise<MotionOpResult[]> {
   const sessionToken = await new ApiClient({
     baseUrl: config.apiBaseUrl,
     apiKey: input.apiKey,
   }).getEditorSessionToken(input.projectId);
-
   const headlessUrl = headlessProjectUrl(input.projectId, sessionToken);
-  // On timeout the underlying launch may still complete later and leak a
-  // browser we have no handle to — an accepted cost; a leaked process beats a
-  // permanently wedged project lock.
-  const page = await withTimeout(
-    acquireEditorPage(headlessUrl, input.projectId),
-    ACQUIRE_TIMEOUT_MS,
-    "Opening the headless editor timed out. Retry the operation.",
+
+  if (config.browserMode === BrowserMode.Local) {
+    return runLocalMotionSession(input, ops, headlessUrl);
+  }
+  return runRemoteMotionSession(
+    {
+      projectId: input.projectId,
+      headlessUrl,
+      save: input.save,
+      onOpDone: input.onOpDone,
+    },
+    ops.map((spec) => spec.op),
   );
+}
+
+async function runLocalMotionSession(
+  input: MotionClipSessionInput,
+  ops: MotionOpSpec[],
+  headlessUrl: string,
+): Promise<MotionOpResult[]> {
+  const logger = log.child({ projectId: input.projectId, component: "motionClipRunner" });
+
+  const page = await acquireEditorPage(headlessUrl, input.projectId, {
+    timeoutMs: ACQUIRE_TIMEOUT_MS,
+  });
 
   try {
-    const results: BridgeMotionGraphicResult[] = [];
+    const results: MotionOpResult[] = [];
     let missingApi = false;
 
-    for (const op of ops) {
+    for (const spec of ops) {
       // Once the editor build is known to lack the motion API, every remaining
       // op would fail the same way — skip the round-trips.
       if (missingApi) {
@@ -97,7 +106,7 @@ export async function runMotionClipSession(
       // acquireEditorPage and flushSave have their own timeouts.
       let opTimer: ReturnType<typeof setTimeout> | undefined;
       const result = await Promise.race([
-        op.run(page),
+        executeMotionOp(page, spec.op),
         new Promise<never>((_, reject) => {
           opTimer = setTimeout(
             () =>
@@ -111,7 +120,7 @@ export async function runMotionClipSession(
         }),
       ])
         .catch(
-          (err): BridgeMotionGraphicResult => ({
+          (err): MotionOpResult => ({
             ok: false,
             error: err instanceof Error ? err.message : String(err),
           }),
@@ -126,7 +135,11 @@ export async function runMotionClipSession(
         missingApi = true;
       }
       results.push(result);
-      logger.info("motion_op_done", { label: op.label, ok: result.ok });
+      logger.info("motion_op_done", {
+        label: spec.label,
+        ok: result.ok,
+        ...(result.error ? { error: result.error } : {}),
+      });
       input.onOpDone?.(results.length - 1, result);
     }
 
@@ -150,9 +163,9 @@ export async function runMotionClipSession(
 
     return results;
   } finally {
-    // browser.close() can hang on a wedged browser; don't let teardown hold the
-    // slots — give it a bounded window, then abandon it (it keeps trying in the
-    // background; worst case a browser process leaks).
+    // releasePage closes gracefully with a bounded window, then SIGKILLs the
+    // browser-server process — a wedged browser can neither hold the slots nor
+    // leak a chrome process that starves later launches.
     await withTimeout(
       releasePage(page).catch(() => {}),
       RELEASE_TIMEOUT_MS,

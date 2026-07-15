@@ -86,7 +86,7 @@ export function registerUploadTools(server: McpServer, apiClient: ApiClient) {
         const lines = [
           `Created **${uploads.length}** upload URL${uploads.length === 1 ? "" : "s"}.`,
           "",
-          "For each file below, PUT its raw bytes to `upload_url` with header `Content-Type: <mime_type>`. The PUT responds with `{ data: { storage_url, media_id } }`. Pass each returned `{ url: storage_url, media_id }` to `edit_video`. No completion call is needed.",
+          "For each file below, PUT its raw bytes to `upload_url` with header `Content-Type: <mime_type>`. Each upload_url is SINGLE-USE — if an upload fails, call add_files again for fresh URLs. The PUT responds with `{ data: { storage_url, media_id } }`. Pass each returned `{ url: storage_url, media_id }` to `edit_video`. No completion call is needed.",
           "",
           "With several files, upload a few in parallel (cap ≈3–4 at once) rather than one long sequential loop — each upload streams the whole file through the server, so a big sequential batch can exceed a single command's time budget. If you still run long, split the uploads across multiple commands.",
           "",

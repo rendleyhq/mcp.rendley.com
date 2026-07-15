@@ -1,10 +1,15 @@
+import { execFile } from "node:child_process";
+import fs from "node:fs/promises";
+import os from "node:os";
+import path from "node:path";
 import {
   chromium,
-  type Browser,
+  type BrowserContext,
   type Page,
 } from "playwright";
 import { config } from "@/config";
 import { log, scrubUrls } from "@/logger";
+import { paceLaunch } from "@/sdk/worker-client";
 
 function getBrowserArgs(): string[] {
   const args = [
@@ -35,16 +40,53 @@ function getBrowserArgs(): string[] {
 
 const VIEWPORT = { width: 960, height: 540 };
 
-async function launchLocalBrowser(): Promise<Browser> {
-  const common = { headless: config.headless, args: getBrowserArgs() };
+// Each session gets its OWN unique user-data-dir, which doubles as the kill
+// handle: a plain Browser from launch() has no process() in Playwright's public
+// API, and launchServer()+connect() doesn't work under Bun (the ws connect
+// never completes) — so a wedged browser is killed by `pkill -f <profile dir>`
+// instead of being abandoned to leak and starve every later launch.
+const sessions = new WeakMap<Page, { userDataDir: string }>();
+
+const DEFAULT_ACQUIRE_TIMEOUT_MS = 4 * 60 * 1000;
+const GRACEFUL_CLOSE_TIMEOUT_MS = 10 * 1000;
+
+function killByUserDataDir(userDataDir: string): void {
+  // -f matches the full command line; the mkdtemp dir is unique per session.
+  execFile("pkill", ["-9", "-f", userDataDir], () => {});
+}
+
+function removeUserDataDir(userDataDir: string): void {
+  void fs.rm(userDataDir, { recursive: true, force: true }).catch(() => {});
+}
+
+function withTimeout<T>(promise: Promise<T>, ms: number, message: string): Promise<T> {
+  let timer: ReturnType<typeof setTimeout> | undefined;
+  return Promise.race([
+    promise,
+    new Promise<never>((_, reject) => {
+      timer = setTimeout(() => reject(new Error(message)), ms);
+    }),
+  ]).finally(() => {
+    if (timer) {
+      clearTimeout(timer);
+    }
+  });
+}
+
+async function launchEditorContext(userDataDir: string): Promise<BrowserContext> {
+  const common = {
+    headless: config.headless,
+    args: getBrowserArgs(),
+    viewport: VIEWPORT,
+  };
   try {
     return config.useChromeChannel
-      ? await chromium.launch({ ...common, channel: "chrome" })
-      : await chromium.launch(common);
+      ? await chromium.launchPersistentContext(userDataDir, { ...common, channel: "chrome" })
+      : await chromium.launchPersistentContext(userDataDir, common);
   } catch (err) {
     if (config.useChromeChannel) {
       log.warn("chrome_channel_unavailable_falling_back", { err });
-      return chromium.launch(common);
+      return chromium.launchPersistentContext(userDataDir, common);
     }
     throw err;
   }
@@ -205,19 +247,68 @@ function explainAuthFailure(projectId: string, diagnostics: AuthDiagnostics): Er
 export async function acquireEditorPage(
   headlessUrl: string,
   projectId: string,
+  opts: { timeoutMs?: number } = {},
 ): Promise<Page> {
-  const browser = await launchLocalBrowser();
+  // Pace local launches too (shared state with the remote pacer): an unpaced
+  // burst of Chromium launches starves the host until launches themselves
+  // start timing out, which is how the leak death-spiral used to begin.
+  await paceLaunch();
+
+  const userDataDir = await fs.mkdtemp(path.join(os.tmpdir(), "rendley-mcp-chromium-"));
+  const acquire = doAcquire(userDataDir, headlessUrl, projectId);
+  try {
+    return await withTimeout(
+      acquire,
+      opts.timeoutMs ?? DEFAULT_ACQUIRE_TIMEOUT_MS,
+      "Opening the headless editor timed out. Retry the operation.",
+    );
+  } catch (err) {
+    // The abandoned acquire may still materialize a page/process later —
+    // destroy it as soon as it settles instead of leaking it with no handle.
+    // (A launch that never settles is bounded by Playwright's own 180s launch
+    // timeout, after which the catch path kills by profile dir.)
+    void acquire
+      .then((page) => releasePage(page))
+      .catch(() => {
+        killByUserDataDir(userDataDir);
+        removeUserDataDir(userDataDir);
+      });
+    throw err;
+  }
+}
+
+async function doAcquire(
+  userDataDir: string,
+  headlessUrl: string,
+  projectId: string,
+): Promise<Page> {
+  const logger = log.child({ projectId, component: "editorAcquire" });
+  const startedAt = Date.now();
+  const stage = (name: string) => logger.info("acquire_stage", { name, ms: Date.now() - startedAt });
+
+  const context = await launchEditorContext(userDataDir);
+  stage("browser_launched");
   let page: Page;
   try {
-    const context = await browser.newContext({ viewport: VIEWPORT });
-    page = await context.newPage();
+    page = context.pages()[0] ?? (await context.newPage());
+    sessions.set(page, { userDataDir });
+    stage("page_created");
   } catch (err) {
-    await browser.close().catch(() => {});
+    await context.close().catch(() => {});
+    killByUserDataDir(userDataDir);
+    removeUserDataDir(userDataDir);
     throw err;
   }
 
   const authDiagnostics = createAuthDiagnostics(page);
-  await page.goto(headlessUrl, { waitUntil: "commit", timeout: 60000 });
+  try {
+    await page.goto(headlessUrl, { waitUntil: "commit", timeout: 60000 });
+    stage("navigation_committed");
+  } catch (err) {
+    authDiagnostics.dispose();
+    await releasePage(page);
+    throw err;
+  }
 
   try {
     await page.waitForFunction(
@@ -244,6 +335,7 @@ export async function acquireEditorPage(
     throw explainAuthFailure(projectId, authDiagnostics.state);
   }
 
+  stage("editor_ready");
   authDiagnostics.dispose();
 
   // Debug: stream the editor's console errors and failed/error API responses to
@@ -301,8 +393,22 @@ export async function releasePage(page: Page): Promise<void> {
     });
     return;
   }
-  const browser = page.context().browser();
+  const session = sessions.get(page);
   try {
+    if (session) {
+      // Graceful close, bounded; a wedged browser is then SIGKILLed (by its
+      // unique profile dir) so the process can never leak and starve later
+      // launches.
+      try {
+        await withTimeout(page.context().close(), GRACEFUL_CLOSE_TIMEOUT_MS, "browser close timed out");
+      } catch {
+        log.warn("motion_release_force_killed");
+        killByUserDataDir(session.userDataDir);
+      }
+      removeUserDataDir(session.userDataDir);
+      return;
+    }
+    const browser = page.context().browser();
     if (browser) await browser.close();
     else if (!page.isClosed()) await page.close();
   } catch {
