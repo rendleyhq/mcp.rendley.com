@@ -133,6 +133,9 @@ export interface BridgeAddMotionGraphicOptions {
   layerId?: string;
   name?: string;
   resources?: BridgeMotionClipResource[];
+  // Skip the editor's per-op save; the session flushes one save at the end.
+  // Older editor builds ignore it and save per-op (harmless, just slower).
+  skipSave?: boolean;
 }
 
 export interface RendleyAgentWindowApi {
@@ -154,12 +157,13 @@ export interface RendleyAgentWindowApi {
   ) => Promise<BridgeMotionGraphicResult>;
   updateMotionGraphicScript?: (
     clipId: string,
-    options: { script: string; resources?: BridgeMotionClipResource[] },
+    options: { script: string; resources?: BridgeMotionClipResource[]; skipSave?: boolean },
   ) => Promise<BridgeMotionGraphicResult>;
   setMotionGraphicProperty?: (
     clipId: string,
     property: string,
     value: unknown,
+    skipSave?: boolean,
   ) => Promise<BridgeOpResult>;
   getMotionGraphic?: (clipId: string) => Promise<BridgeMotionGraphicInfo | null>;
   listMotionGraphics?: () => BridgeMotionGraphicSummary[];
@@ -168,6 +172,7 @@ export interface RendleyAgentWindowApi {
     property: string,
     keyframes: BridgeMotionKeyframe[],
     reset?: boolean,
+    skipSave?: boolean,
   ) => Promise<BridgeOpResult>;
   getMotionGraphicKeyframes?: (clipId: string) => Promise<string>;
 }

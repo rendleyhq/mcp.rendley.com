@@ -50,6 +50,15 @@ const defaults = {
   // editor page is ready. Backstop so a hanging worker script can't wedge the
   // session, the per-project lock, and the browser.
   motionOpTimeoutMs: 60 * 1000,
+  // How long a motion mutation tool waits inline for its job to settle before
+  // returning in_progress + job_id. Fast jobs finish within this and cost the
+  // calling LLM ZERO poll calls — clients like claude.ai budget tool calls per
+  // turn, and immediate-return + poll-loops burn straight through that budget.
+  motionStartWaitMs: 20 * 1000,
+  // How long check_edit long-polls server-side before answering in_progress
+  // (both agent and motion jobs). Same rationale: one held call instead of
+  // many instant polls. Keep comfortably under MCP client tool timeouts (~60s).
+  jobPollWaitMs: 40 * 1000,
   browserRecycleAfter: 8,
   chromiumJsHeapMb: 512,
   headless: true,
@@ -93,6 +102,8 @@ const EnvSchema = z.object({
   BROWSER_RECYCLE_AFTER: intSchema(defaults.browserRecycleAfter),
   AGENT_TIMEOUT_MS: intSchema(defaults.agentTimeoutMs),
   MOTION_OP_TIMEOUT_MS: intSchema(defaults.motionOpTimeoutMs),
+  MOTION_START_WAIT_MS: intSchema(defaults.motionStartWaitMs),
+  JOB_POLL_WAIT_MS: intSchema(defaults.jobPollWaitMs),
   // Abort a worker run if no stream event (progress, result, or ping heartbeat)
   // arrives within this window, instead of waiting out the full run deadline.
   WORKER_STALL_TIMEOUT_MS: intSchema(60 * 1000),
@@ -127,6 +138,8 @@ export const config = {
   browserRecycleAfter: env.BROWSER_RECYCLE_AFTER,
   agentTimeoutMs: env.AGENT_TIMEOUT_MS,
   motionOpTimeoutMs: env.MOTION_OP_TIMEOUT_MS,
+  motionStartWaitMs: env.MOTION_START_WAIT_MS,
+  jobPollWaitMs: env.JOB_POLL_WAIT_MS,
   workerStallTimeoutMs: env.WORKER_STALL_TIMEOUT_MS,
   chromiumJsHeapMb: env.CHROMIUM_JS_HEAP_MB,
   headless: env.HEADLESS,

@@ -2,10 +2,11 @@ import { getJob, updateJob } from "@/jobs/index";
 import { abortJob } from "@/jobs/cancellation";
 import { isTerminal } from "@/jobs/memory-store";
 import type { Job } from "@/types/jobs.types";
-import { JobStatus } from "@/types/jobs.types";
+import { JobKind, JobStatus } from "@/types/jobs.types";
 
 export type CancelOutcome =
   | { status: "not_found" }
+  | { status: "not_cancellable"; job: Job }
   | { status: "already_done"; job: Job }
   | { status: "cancelled"; job: Job };
 
@@ -19,6 +20,9 @@ export async function cancelAgentJob(
 ): Promise<CancelOutcome> {
   const job = await getJob(jobId);
   if (!job || job.owner_key_id !== ownerKeyId) return { status: "not_found" };
+  // Only agent jobs register an abort handle. Marking any other kind cancelled
+  // would lie: its run keeps going and later overwrites the status anyway.
+  if (job.kind !== JobKind.Agent) return { status: "not_cancellable", job };
   if (isTerminal(job.status)) return { status: "already_done", job };
 
   abortJob(jobId);

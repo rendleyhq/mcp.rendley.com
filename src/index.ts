@@ -182,7 +182,8 @@ const FREE_PLAN_PAYWALL_MESSAGE =
 // Tools that stay usable on free plans: motion graphics are authored by the
 // user's own assistant (their Claude/ChatGPT subscription) and cost 0 Rendley
 // credits, so they're exempt from the paid-plan paywall.
-const PAYWALL_EXEMPT_TOOLS = new Set<string>(MOTION_GRAPHICS_TOOL_NAMES);
+// check_edit included: it is the poller for the (exempt) motion-graphics jobs.
+const PAYWALL_EXEMPT_TOOLS = new Set<string>([...MOTION_GRAPHICS_TOOL_NAMES, "check_edit"]);
 
 // Keeps every tool listed (so the assistant sees what's possible) but swaps each
 // handler for an upgrade prompt. Used for free plans: the MCP is a paid feature,

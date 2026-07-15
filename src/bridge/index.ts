@@ -88,7 +88,7 @@ export const bridge = {
   async updateMotionGraphicScript(
     page: Page,
     clipId: string,
-    options: { script: string; resources?: BridgeMotionClipResource[] },
+    options: { script: string; resources?: BridgeMotionClipResource[]; skipSave?: boolean },
   ): Promise<BridgeMotionGraphicResult> {
     return (await page.evaluate(
       async ({ id, opts }) => {
@@ -105,14 +105,15 @@ export const bridge = {
     clipId: string,
     property: string,
     value: unknown,
+    skipSave?: boolean,
   ): Promise<BridgeOpResult> {
     return (await page.evaluate(
-      async ({ id, prop, val }) => {
+      async ({ id, prop, val, skip }) => {
         const agent = window.__rendleyAgent;
         if (!agent?.setMotionGraphicProperty) return { ok: false, error: "__MISSING_MOTION_API__" };
-        return await agent.setMotionGraphicProperty(id, prop, val);
+        return await agent.setMotionGraphicProperty(id, prop, val, skip);
       },
-      { id: clipId, prop: property, val: value },
+      { id: clipId, prop: property, val: value, skip: skipSave },
     )) as BridgeOpResult;
   },
 
@@ -143,14 +144,15 @@ export const bridge = {
     property: string,
     keyframes: BridgeMotionKeyframe[],
     reset?: boolean,
+    skipSave?: boolean,
   ): Promise<BridgeOpResult> {
     return (await page.evaluate(
-      async ({ id, prop, kfs, rst }) => {
+      async ({ id, prop, kfs, rst, skip }) => {
         const agent = window.__rendleyAgent;
         if (!agent?.setMotionGraphicKeyframes) return { ok: false, error: "__MISSING_MOTION_API__" };
-        return await agent.setMotionGraphicKeyframes(id, prop, kfs, rst);
+        return await agent.setMotionGraphicKeyframes(id, prop, kfs, rst, skip);
       },
-      { id: clipId, prop: property, kfs: keyframes, rst: reset },
+      { id: clipId, prop: property, kfs: keyframes, rst: reset, skip: skipSave },
     )) as BridgeOpResult;
   },
 

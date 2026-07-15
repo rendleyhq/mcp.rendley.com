@@ -65,7 +65,7 @@ export function createMemoryJobStore(): JobStore {
         const failed: Job = {
           ...job,
           status: JobStatus.Failed,
-          error: "orphaned",
+          error: "The job made no progress for too long and was marked failed. Retry the operation.",
           result: { reason: "orphaned" },
           updated_at: Date.now(),
         };

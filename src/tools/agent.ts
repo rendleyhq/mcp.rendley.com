@@ -1,25 +1,19 @@
 import { McpServer } from "@modelcontextprotocol/sdk/server/mcp.js";
 import { z } from "zod";
 import type { ApiClient } from "@/api/client";
-import { projectUrl } from "@/config";
-import { runQueued, tryReserveTask, releaseTask } from "@/queue";
+import { config, projectUrl } from "@/config";
 import { fail, formatError, outputAny, truncate } from "@/response";
 import { runAgentJob } from "@/agent-runner";
-import { createJob, getJob, updateJob } from "@/jobs/index";
-import { registerJobAbort, unregisterJobAbort } from "@/jobs/cancellation";
+import { getJob, isJobTerminal, waitForJob } from "@/jobs/index";
+import { launchQueuedJob, QueueFullError } from "@/jobs/launcher";
 import { cancelAgentJob } from "@/agent-cancel";
+import { formatMotionInProgress, formatMotionResult } from "@/tools/motion-graphics";
 import type { Job } from "@/types/jobs.types";
 import { JobKind, JobStatus } from "@/types/jobs.types";
 import { BridgeInterruptType } from "@/types/bridge.types";
 import { validateExternalUrl } from "@/utils/url-guard";
-import {
-  acquireAllOrWait,
-  resolveKeys,
-  MAX_CONCURRENT_PER_END_USER,
-  SLOT_WAIT_TIMEOUT_MS,
-} from "@/concurrency-limits";
+import { resolveKeys, MAX_CONCURRENT_PER_END_USER } from "@/concurrency-limits";
 import { resolveMcpMaxConcurrent } from "@/plan";
-import { recordQueueFullRejected } from "@/metrics";
 import { log } from "@/logger";
 import type { BridgeAttachment } from "@/types/bridge.types";
 
@@ -62,7 +56,7 @@ function formatInProgress(job: Job) {
         text:
           "⏳ The edit is running in the background — this is expected, most edits take a few minutes.\n\n" +
           progressBlock +
-          `Keep polling: call \`check_edit\` with job_id \`${job.job_id}\` again in ~20 seconds. Repeat until it returns a terminal status (completed, failed, or cancelled) — don't stop after one or two checks, and don't tell the user it's done until check_edit confirms it.\n\n` +
+          `Keep polling: call \`check_edit\` with job_id \`${job.job_id}\` — it waits server-side and returns as soon as the edit settles. Repeat until it returns a terminal status (completed, failed, or cancelled) — don't stop after one or two checks, and don't tell the user it's done until check_edit confirms it.\n\n` +
           `Open project: ${url}`,
       },
       projectLink(url),
@@ -274,7 +268,7 @@ export function registerAgentTools(server: McpServer, deps: AgentToolDeps) {
       title: "Edit video",
       description:
         "Create or edit a video through text, using the user's own footage or letting Rendley supply it. Use it for any video creation or editing task. " +
-        'Returns immediately with status "in_progress" and a job_id; the edit runs in the background and usually takes a few minutes. You MUST then poll check_edit with that job_id every ~20s until it reports a terminal status (completed / failed / cancelled) — keep polling until then, do not stop after one or two checks, and do not tell the user it is done until check_edit confirms it. For multiple videos, call this once per video (they run concurrently up to the plan limit, extras queue automatically) and poll each job_id.',
+        'Returns immediately with status "in_progress" and a job_id; the edit runs in the background and usually takes a few minutes. You MUST then call check_edit with that job_id (it waits server-side and returns as soon as the edit settles) until it reports a terminal status (completed / failed / cancelled) — keep polling until then, do not stop after one or two checks, and do not tell the user it is done until check_edit confirms it. For multiple videos, call this once per video (they run concurrently up to the plan limit, extras queue automatically) and poll each job_id.',
       inputSchema: {
         project_id: z.string().regex(ID_RE).describe("Project to work on"),
         message: z
@@ -354,127 +348,83 @@ export function registerAgentTools(server: McpServer, deps: AgentToolDeps) {
         tool: "edit_video",
       });
 
-      // The only hard rejection is the global pending cap; the plan's per-tenant
-      // cap makes a request wait for a run slot (below), it doesn't turn it away.
-      if (!tryReserveTask()) {
-        recordQueueFullRejected();
-        logger.warn("pending_cap_reached_edit_video_rejected");
-        return fail(
-          "The video editor has a lot of edits queued right now. Please retry in a few seconds.",
-        );
-      }
-      let reserved = true;
-      const releaseReserved = () => {
-        if (reserved) {
-          reserved = false;
-          releaseTask();
-        }
-      };
-
-      const maxConcurrent = await resolveMcpMaxConcurrent(apiClient);
-      const { tenantKey, endUserKey } = resolveKeys(userId, end_user_id);
+      const remoteAttachments: BridgeAttachment[] = (files ?? []).map(
+        (file) => ({
+          storage_url: file.url,
+          ...(file.media_id ? { media_id: file.media_id } : {}),
+          ...(file.name?.trim() ? { name: file.name.trim() } : {}),
+        }),
+      );
 
       try {
-        let resolvedThreadId: string | null = thread_id ?? null;
-        if (!resolvedThreadId && continue_conversation) {
-          resolvedThreadId = await apiClient.getLastAgentThread(project_id);
-        }
-        if (!resolvedThreadId) {
-          resolvedThreadId = await apiClient.createAgentThread(project_id);
-        }
-
-        const remoteAttachments: BridgeAttachment[] = (files ?? []).map(
-          (file) => ({
-            storage_url: file.url,
-            ...(file.media_id ? { media_id: file.media_id } : {}),
-            ...(file.name?.trim() ? { name: file.name.trim() } : {}),
-          }),
-        );
-
         for (const attachment of remoteAttachments) {
           if (attachment.storage_url) {
             validateExternalUrl(attachment.storage_url);
           }
         }
 
-        const job = await createJob({
-          kind: JobKind.Agent,
-          project_id,
-          owner_key_id: apiKeyId,
-          thread_id: resolvedThreadId,
+        const job = await launchQueuedJob({
+          cancellable: true,
+          prepare: async () => {
+            let resolvedThreadId: string | null = thread_id ?? null;
+            if (!resolvedThreadId && continue_conversation) {
+              resolvedThreadId = await apiClient.getLastAgentThread(project_id);
+            }
+            if (!resolvedThreadId) {
+              resolvedThreadId = await apiClient.createAgentThread(project_id);
+            }
+
+            const maxConcurrent = await resolveMcpMaxConcurrent(apiClient);
+            const { tenantKey, endUserKey } = resolveKeys(userId, end_user_id);
+
+            // The plan's concurrent-run cap and the one-edit-per-project lock:
+            // two concurrent edits on the same project would each load it in a
+            // separate tab and race on the save.
+            const slots = [
+              { key: tenantKey, max: maxConcurrent },
+              { key: `project:${project_id}`, max: 1 },
+            ];
+            if (endUserKey !== tenantKey) {
+              slots.push({ key: endUserKey, max: MAX_CONCURRENT_PER_END_USER });
+            }
+
+            return {
+              job: {
+                kind: JobKind.Agent,
+                project_id,
+                owner_key_id: apiKeyId,
+                thread_id: resolvedThreadId,
+              },
+              slots,
+            };
+          },
+          run: (job, signal) =>
+            runAgentJob({
+              jobId: job.job_id,
+              apiKey,
+              apiKeyId,
+              projectId: project_id,
+              prompt: message,
+              attachments: remoteAttachments,
+              threadId: job.thread_id!,
+              signal: signal!,
+            }),
         });
 
         logger.info("edit_video_job_started", {
           jobId: job.job_id,
-          threadId: resolvedThreadId,
+          threadId: job.thread_id,
           files: remoteAttachments.length,
         });
 
-        const abort = registerJobAbort(job.job_id);
-
-        // The plan's concurrent-run cap and the one-edit-per-project lock are
-        // enforced here, per run: two concurrent edits on the same project would
-        // each load it in a separate tab and race on the save.
-        const runReqs = [
-          { key: tenantKey, max: maxConcurrent },
-          { key: `project:${project_id}`, max: 1 },
-        ];
-        if (endUserKey !== tenantKey) {
-          runReqs.push({ key: endUserKey, max: MAX_CONCURRENT_PER_END_USER });
-        }
-
-        // Fire-and-forget: wait for a run slot (so a batch queues instead of being
-        // rejected), run, then release everything. The tool returns the job_id now
-        // and the client polls check_edit until the job reaches a terminal state.
-        void (async () => {
-          const slots = await acquireAllOrWait(runReqs, {
-            signal: abort.signal,
-            timeoutMs: SLOT_WAIT_TIMEOUT_MS,
-          });
-          if (!slots) {
-            // Aborted → the cancel path already set the terminal status. Timed out
-            // waiting → record it so the poller gets a definite answer.
-            if (!abort.signal.aborted) {
-              await updateJob(job.job_id, {
-                status: JobStatus.Failed,
-                error: "No editor slot became available in time.",
-                result: { reason: "slot_wait_timeout" },
-              }).catch(() => null);
-            }
-            unregisterJobAbort(job.job_id);
-            releaseReserved();
-            return;
-          }
-          try {
-            await runQueued(() =>
-              runAgentJob({
-                jobId: job.job_id,
-                apiKey,
-                apiKeyId,
-                projectId: project_id,
-                prompt: message,
-                attachments: remoteAttachments,
-                threadId: resolvedThreadId,
-                signal: abort.signal,
-              }),
-            );
-          } catch (err) {
-            logger.error("agent_job_run_failed", { jobId: job.job_id, err });
-            await updateJob(job.job_id, {
-              status: JobStatus.Failed,
-              error: err instanceof Error ? err.message : String(err),
-              result: { reason: "enqueue_failed" },
-            }).catch(() => null);
-          } finally {
-            await slots.release();
-            unregisterJobAbort(job.job_id);
-            releaseReserved();
-          }
-        })();
-
         return formatInProgress(job);
       } catch (err) {
-        releaseReserved();
+        if (err instanceof QueueFullError) {
+          logger.warn("pending_cap_reached_edit_video_rejected");
+          return fail(
+            "The video editor has a lot of edits queued right now. Please retry in a few seconds.",
+          );
+        }
         logger.error("send_failed", { err });
         return fail(`Agent message failed: ${formatError(err)}`);
       }
@@ -486,12 +436,12 @@ export function registerAgentTools(server: McpServer, deps: AgentToolDeps) {
     {
       title: "Check edit status",
       description:
-        "Poll the status of a video edit started by edit_video. Pass the job_id it returned. While the edit is still running this reports in_progress with recent progress — keep calling it every ~20s until it returns a terminal status (completed / failed / cancelled); only then is the edit actually done. When finished it returns the same result edit_video would have.",
+        "Check the status of ANY background job — a video edit started by edit_video, or a motion-graphics job started by create_motion_graphic / update_motion_graphic / set_motion_keyframes / batch_motion_graphics. Pass the job_id it returned. The call waits server-side and returns as soon as the job settles; while still running it reports in_progress — keep calling it until it returns a terminal status (completed / failed / cancelled); only then is the work actually done.",
       inputSchema: {
         job_id: z
           .string()
           .uuid()
-          .describe("The job_id returned by edit_video when the edit went to the background."),
+          .describe("The job_id returned by edit_video or a motion-graphics mutation."),
       },
       outputSchema: outputAny,
       annotations: {
@@ -500,19 +450,29 @@ export function registerAgentTools(server: McpServer, deps: AgentToolDeps) {
       },
     },
     async ({ job_id }) => {
+      // Ownership first (cheap read), then long-poll: hold the request until
+      // the job settles or the wait window passes, so LLM clients don't burn
+      // their per-turn tool-call budget on instant in_progress responses.
       const job = await getJob(job_id);
       // Wrong-owner reads the same as missing so job ids can't be enumerated.
-      if (!job || job.owner_key_id !== apiKeyId || job.kind !== JobKind.Agent) {
+      if (!job || job.owner_key_id !== apiKeyId) {
         return fail(
-          "This edit could no longer be found — it may have finished a while ago. Run the edit again if you still need it.",
+          "This job could no longer be found — it may have finished a while ago. Run it again if you still need it.",
         );
       }
 
-      if (job.status === JobStatus.Pending || job.status === JobStatus.Running) {
-        return formatInProgress(job);
+      const settled = (await waitForJob(job_id, config.jobPollWaitMs)) ?? job;
+      if (job.kind === JobKind.MotionGraphic) {
+        if (!isJobTerminal(settled)) {
+          return formatMotionInProgress(settled, "Working");
+        }
+        return formatMotionResult(settled);
+      }
+      if (!isJobTerminal(settled)) {
+        return formatInProgress(settled);
       }
 
-      return formatJobResult(job);
+      return formatJobResult(settled);
     },
   );
 
@@ -539,6 +499,11 @@ export function registerAgentTools(server: McpServer, deps: AgentToolDeps) {
       if (outcome.status === "not_found") {
         return fail(
           "This edit could no longer be found — it may have already finished.",
+        );
+      }
+      if (outcome.status === "not_cancellable") {
+        return fail(
+          "This job can't be cancelled (only edit_video jobs can). Motion-graphics jobs finish quickly — wait for check_edit to report a terminal status.",
         );
       }
       if (outcome.status === "already_done") {

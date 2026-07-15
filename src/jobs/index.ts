@@ -18,6 +18,30 @@ export function updateJob(id: string, patch: Partial<Job>): Promise<Job | null> 
   return store.update(id, patch);
 }
 
+const TERMINAL_STATUSES = new Set([JobStatus.Completed, JobStatus.Failed, JobStatus.Cancelled]);
+
+export function isJobTerminal(job: Job): boolean {
+  return TERMINAL_STATUSES.has(job.status);
+}
+
+// Long-poll: resolves as soon as the job reaches a terminal status, or with the
+// latest snapshot once timeoutMs elapses. Holding the request server-side keeps
+// LLM clients from burning their per-turn tool-call budget on instant
+// in_progress polls. Cheap: the store is in-memory (single replica).
+export async function waitForJob(id: string, timeoutMs: number, intervalMs = 500): Promise<Job | null> {
+  const deadline = Date.now() + timeoutMs;
+  let job = await store.get(id);
+  while (job && !isJobTerminal(job)) {
+    const remaining = deadline - Date.now();
+    if (remaining <= 0) {
+      break;
+    }
+    await new Promise((resolve) => setTimeout(resolve, Math.min(intervalMs, remaining)));
+    job = await store.get(id);
+  }
+  return job;
+}
+
 // Fail every job still running on this replica so pollers get a terminal
 // answer. Called during shutdown after the drain window, so only jobs that
 // genuinely didn't finish in time are marked. Returns how many were failed.
