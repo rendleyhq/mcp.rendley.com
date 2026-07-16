@@ -26,10 +26,26 @@ interface RunInput {
   signal?: AbortSignal;
 }
 
-// Runs the browser-mediated agent edit and writes the terminal state to the
-// job store. Returns the final job record so synchronous callers (the hybrid
+// Runs the browser-mediated agent edit and writes the terminal state to the job
+// store, then emits ONE wide completion event (status + duration) covering every
+// exit path. Returns the final job record so synchronous callers (the hybrid
 // edit_video window) can use the result without re-reading the store.
 export async function runAgentJob(input: RunInput): Promise<Job | null> {
+  const startedAt = Date.now();
+  const job = await runAgentJobInner(input);
+  const result = job?.result as { reason?: string } | undefined;
+  log.info("agent_job_finished", {
+    jobId: input.jobId,
+    projectId: input.projectId,
+    threadId: input.threadId,
+    status: job?.status ?? "unknown",
+    reason: result?.reason,
+    duration_ms: Date.now() - startedAt,
+  });
+  return job;
+}
+
+async function runAgentJobInner(input: RunInput): Promise<Job | null> {
   const maxWaitMs = input.maxWaitMs ?? config.agentTimeoutMs;
   const logger = log.child({
     jobId: input.jobId,

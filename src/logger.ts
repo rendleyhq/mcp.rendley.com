@@ -1,6 +1,7 @@
 import pino from "pino";
 import pretty from "pino-pretty";
 import { logs, SeverityNumber, type AnyValue } from "@opentelemetry/api-logs";
+import { getRequestContext } from "@/request-context";
 
 const MAX_FIELD_CHARS = 1000;
 
@@ -123,6 +124,18 @@ const options: pino.LoggerOptions = {
   level: (process.env.LOG_LEVEL ?? "info").toLowerCase(),
   messageKey: "event",
   timestamp: () => `,"ts":"${new Date().toISOString()}"`,
+  // Stamp request_id / user_id (from AsyncLocalStorage) onto every line so logs
+  // from anywhere in a request correlate and link to the person (user_id).
+  mixin() {
+    const ctx = getRequestContext();
+    if (!ctx) {
+      return {};
+    }
+    return {
+      request_id: ctx.request_id,
+      ...(ctx.user_id ? { user_id: ctx.user_id } : {}),
+    };
+  },
   formatters: {
     level(label) {
       return { level: label };

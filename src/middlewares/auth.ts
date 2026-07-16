@@ -2,6 +2,7 @@ import type { Context, MiddlewareHandler } from "hono";
 import { ApiClient } from "@/api/client";
 import { config, protectedResourceMetadataUrl } from "@/config";
 import { log } from "@/logger";
+import { setRequestUser } from "@/request-context";
 import { isPaidPlan } from "@/plan";
 
 export type AppEnv = {
@@ -39,6 +40,7 @@ function extractBearerToken(header?: string): string {
 export const requireBearer: MiddlewareHandler<AppEnv> = async (c, next) => {
   const bearer = extractBearerToken(c.req.header("authorization"));
   if (!bearer) {
+    log.warn("auth_missing_credentials", { path: c.req.routePath });
     return unauthorized(
       c,
       "Authentication required. Send an API key as Authorization: Bearer <key>, or follow the WWW-Authenticate header to sign in via OAuth.",
@@ -65,6 +67,7 @@ export const requireBearer: MiddlewareHandler<AppEnv> = async (c, next) => {
     );
     c.set("apiKeyId", verified.keyId);
     c.set("userId", verified.userId);
+    setRequestUser(verified.userId);
     return next();
   }
 
@@ -85,6 +88,7 @@ export const requireBearer: MiddlewareHandler<AppEnv> = async (c, next) => {
     );
     c.set("apiKeyId", `oauth:${oauth.userId}`);
     c.set("userId", oauth.userId);
+    setRequestUser(oauth.userId);
     return next();
   }
   if (oauthUnavailable && apiKeyUnavailable) {
@@ -99,6 +103,7 @@ export const requireBearer: MiddlewareHandler<AppEnv> = async (c, next) => {
     );
   }
 
+  log.warn("auth_invalid_credentials", { path: c.req.routePath });
   return unauthorized(c, "Invalid credentials");
 };
 

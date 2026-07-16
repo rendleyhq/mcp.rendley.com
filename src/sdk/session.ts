@@ -262,7 +262,10 @@ function attachDebugStream(page: Page, projectId: string): void {
   page.on("console", (message) => {
     const type = message.type();
     if (type !== "error" && type !== "warning") return;
-    logger.warn("editor_console", { level: type, text: message.text() });
+    // Editor console is high-volume; only surface actual errors, and at debug.
+    if (type === "error") {
+      logger.debug("editor_console", { level: type, text: message.text() });
+    }
   });
 
   page.on("pageerror", (error) => {

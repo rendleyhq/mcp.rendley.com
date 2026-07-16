@@ -16,6 +16,9 @@ if (process.env.LOGS_ENABLED === "true" && process.env.POSTHOG_API_KEY) {
     resource: resourceFromAttributes({
       "service.name": "mcp",
       "deployment.environment.name": process.env.NODE_ENV ?? "production",
+      // SERVICE_VERSION (git sha) injected at deploy so a failure spike ties to a
+      // release; falls back to "dev" locally.
+      "service.version": process.env.SERVICE_VERSION ?? "dev",
     }),
     processors: [
       new BatchLogRecordProcessor({
