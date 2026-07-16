@@ -1,7 +1,6 @@
 import { Hono } from "hono";
 import { cors } from "hono/cors";
 import { secureHeaders } from "hono/secure-headers";
-import { otel } from "@hono/otel";
 import type { Context } from "hono";
 import { McpServer } from "@modelcontextprotocol/sdk/server/mcp.js";
 import { WebStandardStreamableHTTPServerTransport } from "@modelcontextprotocol/sdk/server/webStandardStreamableHttp.js";
@@ -34,7 +33,6 @@ app.use("/.well-known/*", async (c, next) => {
   c.header("Cross-Origin-Resource-Policy", "cross-origin");
 });
 
-app.use("*", otel());
 
 app.use(
   "*",

@@ -2,6 +2,7 @@
 import { jobQueue } from "@/queue";
 import { failInterruptedJobs } from "@/jobs/index";
 import { shutdownAnalytics } from "@/analytics";
+import { shutdownTelemetry } from "@/instrumentation";
 import { log } from "@/logger";
 
 interface ClosableServer {
@@ -64,6 +65,9 @@ async function gracefulShutdown(
   await shutdownAnalytics();
 
   log.info("shutdown_complete");
+
+  // Last: flush pending PostHog log batches (including the line above).
+  await shutdownTelemetry();
 }
 
 async function closeServer(server: ClosableServer): Promise<void> {
