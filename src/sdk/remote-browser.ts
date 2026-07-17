@@ -98,7 +98,7 @@ export class RemoteAgentBrowser extends AgentBrowser {
         ) {
           busyAttempt += 1;
           const waitSec = Math.min(err.retryAfterSeconds || 5, 15);
-          log.warn("remote_agent_browser_busy_retry", {
+          log.debug("remote browser busy, retrying", {
             attempt: busyAttempt,
             waitSeconds: waitSec,
           });
@@ -115,7 +115,7 @@ export class RemoteAgentBrowser extends AgentBrowser {
         ) {
           connectAttempt += 1;
           const waitMs = Math.min(1000 * 2 ** (connectAttempt - 1), 5000);
-          log.warn("remote_agent_worker_retry", {
+          log.warn("remote worker failed, retrying", {
             attempt: connectAttempt,
             code: err.code,
             waitMs,
@@ -208,7 +208,7 @@ export class RemoteAgentBrowser extends AgentBrowser {
       try {
         evt = JSON.parse(trimmed) as WorkerEvent;
       } catch {
-        log.warn("remote_agent_unparseable_line", { line: trimmed.slice(0, 200) });
+        log.debug("unparseable line from remote worker", { line: trimmed.slice(0, 200) });
         return;
       }
       switch (evt.type) {

@@ -40,7 +40,7 @@ function extractBearerToken(header?: string): string {
 export const requireBearer: MiddlewareHandler<AppEnv> = async (c, next) => {
   const bearer = extractBearerToken(c.req.header("authorization"));
   if (!bearer) {
-    log.warn("auth_missing_credentials", { path: c.req.routePath });
+    log.debug("authentication credentials missing", { path: c.req.routePath });
     return unauthorized(
       c,
       "Authentication required. Send an API key as Authorization: Bearer <key>, or follow the WWW-Authenticate header to sign in via OAuth.",
@@ -55,7 +55,7 @@ export const requireBearer: MiddlewareHandler<AppEnv> = async (c, next) => {
   } catch (err) {
     const message = err instanceof Error ? err.message : String(err);
     if (message !== "invalid_api_key") {
-      log.error("verify_api_key_failed", { err });
+      log.error("failed to verify api key", { err });
       apiKeyUnavailable = true;
     }
   }
@@ -77,7 +77,7 @@ export const requireBearer: MiddlewareHandler<AppEnv> = async (c, next) => {
   try {
     oauth = await ApiClient.verifyMcpToken(config.authBaseUrl, bearer);
   } catch (err) {
-    log.error("verify_oauth_token_failed", { err });
+    log.error("failed to verify oauth token", { err });
     oauthUnavailable = true;
   }
   if (oauth) {
@@ -103,7 +103,7 @@ export const requireBearer: MiddlewareHandler<AppEnv> = async (c, next) => {
     );
   }
 
-  log.warn("auth_invalid_credentials", { path: c.req.routePath });
+  log.warn("invalid authentication credentials", { path: c.req.routePath });
   return unauthorized(c, "Invalid credentials");
 };
 
@@ -114,7 +114,7 @@ export const requireBearer: MiddlewareHandler<AppEnv> = async (c, next) => {
 // a transient /users/me blip never locks out a paying customer.
 export const requirePaidPlan: MiddlewareHandler<AppEnv> = async (c, next) => {
   if (!(await isPaidPlan(c.get("apiClient")))) {
-    log.info("mcp_blocked_free_plan", { userId: c.get("userId") });
+    log.info("mcp blocked for free plan", { userId: c.get("userId") });
     return c.json(
       {
         error: {

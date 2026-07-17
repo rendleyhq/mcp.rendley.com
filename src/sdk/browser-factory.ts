@@ -13,7 +13,7 @@ export function getAgentBrowser(): AgentBrowser {
       config.browserMode === BrowserMode.Local
         ? new LocalAgentBrowser()
         : new RemoteAgentBrowser();
-    log.info("agent_browser_selected", {
+    log.debug("browser backend selected", {
       mode: config.browserMode,
       ...(config.browserMode === BrowserMode.Remote
         ? { workerUrl: config.browserWorkerUrl }

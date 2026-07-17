@@ -34,7 +34,7 @@ export async function runAgentJob(input: RunInput): Promise<Job | null> {
   const startedAt = Date.now();
   const job = await runAgentJobInner(input);
   const result = job?.result as { reason?: string } | undefined;
-  log.info("agent_job_finished", {
+  log.info("agent job finished", {
     jobId: input.jobId,
     projectId: input.projectId,
     threadId: input.threadId,
@@ -50,7 +50,7 @@ async function runAgentJobInner(input: RunInput): Promise<Job | null> {
   const logger = log.child({
     jobId: input.jobId,
     projectId: input.projectId,
-    component: "agentRunner",
+    component: "agent_runner",
   });
 
   const progressRing: string[] = [];
@@ -80,10 +80,10 @@ async function runAgentJobInner(input: RunInput): Promise<Job | null> {
   };
 
   try {
-    logger.info("start", { attachments: input.attachments.length });
+    logger.info("agent run started", { attachments: input.attachments.length });
 
     if (input.signal?.aborted) {
-      logger.info("cancelled_before_start");
+      logger.info("agent run cancelled before start");
       return await markCancelled();
     }
 
@@ -175,11 +175,11 @@ async function runAgentJobInner(input: RunInput): Promise<Job | null> {
     }
   } catch (err) {
     if (input.signal?.aborted) {
-      logger.info("cancelled");
+      logger.info("agent run cancelled");
       return await markCancelled();
     }
     if (err instanceof BrowserBusyError) {
-      logger.warn("browser_busy", { err });
+      logger.warn("browser worker at capacity", { err });
       return await updateJob(input.jobId, {
         status: JobStatus.Failed,
         error: "browser worker at capacity",
@@ -191,7 +191,7 @@ async function runAgentJobInner(input: RunInput): Promise<Job | null> {
         },
       });
     }
-    logger.error("failed", { err });
+    logger.error("agent run failed", { err });
     return await updateJob(input.jobId, {
       status: JobStatus.Failed,
       error: err instanceof Error ? err.message : String(err),

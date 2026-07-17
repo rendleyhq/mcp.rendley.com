@@ -13,7 +13,7 @@ export class LocalAgentBrowser extends AgentBrowser {
     signal?: AbortSignal,
   ): Promise<PollOutcome> {
     void signal;
-    const logger = log.child({ projectId: input.projectId, component: "localAgent" });
+    const logger = log.child({ projectId: input.projectId, component: "local_agent" });
     await onProgress("Opening editor");
     const page = await acquireEditorPage(input.headlessUrl, input.projectId);
     try {

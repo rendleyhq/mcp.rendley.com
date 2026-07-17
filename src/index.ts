@@ -56,11 +56,11 @@ app.use("*", async (c, next) => {
         duration_ms,
       };
       if (status >= 500) {
-        log.error("http_request", attrs);
+        log.error("http request failed", attrs);
       } else if (status >= 400) {
-        log.warn("http_request", attrs);
+        log.warn("http request client error", attrs);
       } else if (duration_ms >= SLOW_REQUEST_MS) {
-        log.info("http_request", attrs);
+        log.info("slow http request", attrs);
       }
     }
   });
@@ -237,13 +237,13 @@ function installToolLogging(server: McpServer): void {
         const result = (await cb(...args)) as { isError?: boolean };
         const duration_ms = Math.round(performance.now() - start);
         if (result?.isError) {
-          log.warn("tool_failed", { tool: name, duration_ms });
+          log.warn("tool failed", { tool: name, duration_ms });
         } else {
-          log.info("tool_completed", { tool: name, duration_ms });
+          log.info("tool completed", { tool: name, duration_ms });
         }
         return result;
       } catch (err) {
-        log.error("tool_threw", {
+        log.error("tool threw unhandled error", {
           tool: name,
           duration_ms: Math.round(performance.now() - start),
           err,
@@ -319,7 +319,7 @@ const server = Bun.serve({
 
 installShutdownHandlers({ server });
 
-log.info("mcp_server_started", {
+log.info("mcp server started", {
   port: config.port,
   queueConcurrency: config.queueConcurrency,
   browserMode: config.browserMode,

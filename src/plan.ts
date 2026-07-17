@@ -28,7 +28,7 @@ export async function resolvePlanInfo(apiClient: ApiClient): Promise<PlanInfo> {
     };
   } catch (err) {
     recordPlanResolveFailed();
-    log.warn("plan_info_resolve_failed", {
+    log.warn("failed to resolve plan info", {
       err: err instanceof Error ? err.message : String(err),
     });
     return {
