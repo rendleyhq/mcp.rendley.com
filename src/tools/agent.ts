@@ -14,6 +14,8 @@ import { BridgeInterruptType } from "@/types/bridge.types";
 import { validateExternalUrl } from "@/utils/url-guard";
 import { resolveKeys, MAX_CONCURRENT_PER_END_USER } from "@/concurrency-limits";
 import { resolveMcpMaxConcurrent } from "@/plan";
+import { capture } from "@/analytics";
+import { AnalyticsEvent } from "@/analytics.types";
 import { log } from "@/logger";
 import type { BridgeAttachment } from "@/types/bridge.types";
 
@@ -416,6 +418,8 @@ export function registerAgentTools(server: McpServer, deps: AgentToolDeps) {
           threadId: job.thread_id,
           files: remoteAttachments.length,
         });
+
+        capture(userId, AnalyticsEvent.EDIT_VIDEO, { project_id });
 
         return formatInProgress(job);
       } catch (err) {

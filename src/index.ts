@@ -19,7 +19,7 @@ import {
   registerMotionGraphicsTools,
   MOTION_GRAPHICS_TOOL_NAMES,
 } from "@/tools/motion-graphics";
-import { isPaidPlan } from "@/plan";
+import { resolvePlanInfo } from "@/plan";
 import { fail } from "@/response";
 import { handleStartAgentJob } from "@/http/agent";
 import { handleGetJob, handleCancelJob } from "@/http/jobs";
@@ -221,8 +221,11 @@ async function handleMCPRequest(c: Context<AppEnv>): Promise<Response> {
 
   const userId = c.get("userId");
 
+  // One /users/me read serves both paywall gating and the analytics plan label.
+  const planInfo = await resolvePlanInfo(apiClient);
+
   // Paid-only: free plans get every tool call answered with an upgrade prompt.
-  if (!(await isPaidPlan(apiClient))) {
+  if (!planInfo.isPaid) {
     installFreePlanPaywall(server);
   }
 

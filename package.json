@@ -36,6 +36,7 @@
     "p-queue": "^9.1.2",
     "pino": "^9.5.0",
     "playwright": "1.59.1",
+    "posthog-node": "^4.18.0",
     "xxhashjs": "^0.2.2",
     "zod": "^3.25.67"
   },
