@@ -265,6 +265,41 @@ export function registerAgentTools(server: McpServer, deps: AgentToolDeps) {
   const { apiClient, userId, apiKey, apiKeyId } = deps;
 
   server.registerTool(
+    "get_editing_guide",
+    {
+      title: "Video editing authoring guide",
+      description:
+        "Return the guide for driving edit_video: how to phrase editing intents, how the agent reads the project (query_project vs get_editor_context), destructive-edits-first ordering, motion-clip/caption placement, refinement-not-rebuild rules, and the available SDK editor commands. Read this before your first edit_video call on a project. Applying edits still runs asynchronously via edit_video + check_edit.",
+      inputSchema: {},
+      outputSchema: outputAny,
+      annotations: { readOnlyHint: true, destructiveHint: false, openWorldHint: false },
+    },
+    async () => {
+      try {
+        const guide = await apiClient.getEditingGuide();
+        return {
+          content: [
+            {
+              type: "text" as const,
+              text:
+                "# Video editing — authoring guide\n\n" +
+                guide.authoring_guide +
+                "\n\n# Editor SDK commands\n\n" +
+                guide.sdk_commands,
+            },
+          ],
+          structuredContent: {
+            authoring_guide: guide.authoring_guide,
+            sdk_commands: guide.sdk_commands,
+          },
+        };
+      } catch (err) {
+        return fail(`Could not fetch the editing guide: ${formatError(err)}`);
+      }
+    },
+  );
+
+  server.registerTool(
     "edit_video",
     {
       title: "Edit video",

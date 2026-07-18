@@ -347,6 +347,10 @@ export class ApiClient {
     return this.get<{ code_rules: string; design_guide: string }>("/agent/motion-clip/guide");
   }
 
+  async getEditingGuide(): Promise<{ authoring_guide: string; sdk_commands: string }> {
+    return this.get<{ authoring_guide: string; sdk_commands: string }>("/agent/editing-guide");
+  }
+
   async listWorkspaces(): Promise<Workspace[]> {
     return this.get<Workspace[]>("/workspaces");
   }
