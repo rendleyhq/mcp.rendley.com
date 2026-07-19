@@ -148,6 +148,7 @@ All configuration is via environment variables; start from [`.env.example`](./.e
 | `CPU_ONLY` | `false` | Force software WebGL (SwiftShader) on hosts without a GPU. |
 | `QUEUE_CONCURRENCY` | `120` | Max concurrent browser-backed jobs per container. |
 | `CORS_ORIGINS` | none | CSV allowlist of browser origins. Empty disables CORS. |
+| `WEBHOOK_SIGNING_SECRET` | none | Master secret for outbound job [webhooks](#webhooks). Empty disables them. |
 
 ## Endpoints
 
@@ -172,13 +173,72 @@ curl -X POST https://mcp.rendley.com/v1/agent \
     "files": [
       { "url": "https://cdn.example.com/photo1.jpg" },
       { "url": "https://cdn.example.com/photo2.jpg" }
-    ]
+    ],
+    "webhook_url": "https://your-app.example.com/hooks/rendley"
   }'
 
 # Poll it
 curl -H "Authorization: Bearer $RENDLEY_API_KEY" \
   https://mcp.rendley.com/v1/jobs/<job_id>
 ```
+
+`webhook_url` is optional — see [Webhooks](#webhooks). Without it, poll `GET /v1/jobs/:id` until the status is terminal.
+
+## Webhooks
+
+Pass a `webhook_url` (public `https` only) to `POST /v1/agent` or to the `edit_video` MCP tool and the server POSTs the job once, when it reaches a terminal state (`completed`, `failed`, or `cancelled`). Delivery is at-least-once in spirit but best-effort in practice: one 10s attempt, then two retries (after 1s and 4s) on a network error or a non-2xx response. Redirects are not followed. Keep polling as your fallback.
+
+Each delivery carries:
+
+| Header | |
+| --- | --- |
+| `X-Rendley-Signature` | `t=<unix-seconds>,v1=<hex-hmac>` |
+| `X-Rendley-Event` | `job.updated` |
+| `X-Rendley-Job-Id` | the job id |
+
+Body:
+
+```json
+{
+  "job_id": "9d0b1c2e-4f6a-4a9c-8f1b-1a2b3c4d5e6f",
+  "kind": "agent",
+  "status": "completed",
+  "project_id": "prj_123",
+  "thread_id": "thr_456",
+  "result": {
+    "project_id": "prj_123",
+    "project_url": "https://app.rendley.com/editor/prj_123",
+    "commands_applied": 7,
+    "saved": true,
+    "thread_id": "thr_456"
+  },
+  "created_at": "2026-07-19T10:31:04.512Z",
+  "updated_at": "2026-07-19T10:33:47.109Z"
+}
+```
+
+### Verifying the signature
+
+`v1` is `HMAC-SHA256(secret, "<t>." + rawBody)`, hex-encoded, where `rawBody` is the exact bytes received — verify before parsing the JSON. Compare in constant time, and reject a `t` more than ~5 minutes from now to blunt replays.
+
+The `secret` is per-user. Fetch it once from `GET https://api.rendley.com/v1/webhooks/secret` with your API key. **One secret verifies deliveries from both hosts** — `api.rendley.com` export webhooks and `mcp.rendley.com` job webhooks sign identically.
+
+```js
+import { createHmac, timingSafeEqual } from "node:crypto";
+
+function verify(rawBody, header, secret) {
+  const parts = Object.fromEntries(
+    header.split(",").map((p) => p.split("=").map((s) => s.trim())),
+  );
+  const expected = createHmac("sha256", secret)
+    .update(`${parts.t}.${rawBody}`)
+    .digest();
+  const actual = Buffer.from(parts.v1, "hex");
+  return actual.length === expected.length && timingSafeEqual(actual, expected);
+}
+```
+
+Self-hosting: set `WEBHOOK_SIGNING_SECRET` to the same master secret `api.rendley.com` uses, otherwise the secret it serves won't verify this server's deliveries. When it's unset, any request carrying a `webhook_url` is rejected up front with `400 WEBHOOKS_DISABLED` (the `edit_video` tool returns the equivalent error) — no job is started.
 
 ## Runtime notes
 

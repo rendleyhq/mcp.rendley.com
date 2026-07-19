@@ -16,6 +16,8 @@ export interface Job {
   kind: JobKind;
   project_id: string;
   owner_key_id: string;
+  user_id: string;
+  webhook_url?: string;
   status: JobStatus;
   last_message?: string;
   result?: unknown;
@@ -32,6 +34,8 @@ export interface CreateJobInput {
   kind: JobKind;
   project_id: string;
   owner_key_id: string;
+  user_id: string;
+  webhook_url?: string;
   thread_id?: string;
 }
 

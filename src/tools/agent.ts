@@ -1,7 +1,7 @@
 import { McpServer } from "@modelcontextprotocol/sdk/server/mcp.js";
 import { z } from "zod";
 import type { ApiClient } from "@/api/client";
-import { projectUrl } from "@/config";
+import { config, projectUrl } from "@/config";
 import { runQueued, tryReserveTask, releaseTask } from "@/queue";
 import { fail, formatError, outputAny, truncate } from "@/response";
 import { runAgentJob } from "@/agent-runner";
@@ -11,7 +11,7 @@ import { cancelAgentJob } from "@/agent-cancel";
 import type { Job } from "@/types/jobs.types";
 import { JobKind, JobStatus } from "@/types/jobs.types";
 import { BridgeInterruptType } from "@/types/bridge.types";
-import { validateExternalUrl } from "@/utils/url-guard";
+import { validateExternalUrl, validateWebhookUrl, UrlGuardError } from "@/utils/url-guard";
 import {
   acquireAllOrWait,
   resolveKeys,
@@ -335,6 +335,13 @@ export function registerAgentTools(server: McpServer, deps: AgentToolDeps) {
           .describe(
             "Optional. Identifies the downstream end user on whose behalf this edit runs, so per-user concurrency limits apply. Omit for single-user keys.",
           ),
+        webhook_url: z
+          .string()
+          .max(2048)
+          .optional()
+          .describe(
+            "Optional. A public https URL to POST the signed job result to when the edit reaches a terminal state, instead of relying only on check_edit polling.",
+          ),
       },
       outputSchema: outputAny,
       annotations: {
@@ -350,11 +357,30 @@ export function registerAgentTools(server: McpServer, deps: AgentToolDeps) {
       thread_id,
       continue_conversation,
       end_user_id,
+      webhook_url,
     }) => {
       const logger = log.child({
         projectId: project_id,
         tool: "edit_video",
       });
+
+      // Checked before the pending-cap reservation and any remote call so a bad
+      // URL fails with nothing reserved and no thread created.
+      if (webhook_url) {
+        if (!config.webhookSigningSecret) {
+          return fail(
+            "WEBHOOKS_DISABLED: this server has no webhook signing secret configured. Retry without webhook_url and poll check_edit instead.",
+          );
+        }
+        try {
+          validateWebhookUrl(webhook_url);
+        } catch (err) {
+          if (err instanceof UrlGuardError) {
+            return fail(`webhook_url rejected: ${err.message}`);
+          }
+          throw err;
+        }
+      }
 
       // The only hard rejection is the global pending cap; the plan's per-tenant
       // cap makes a request wait for a run slot (below), it doesn't turn it away.
@@ -403,6 +429,8 @@ export function registerAgentTools(server: McpServer, deps: AgentToolDeps) {
           kind: JobKind.Agent,
           project_id,
           owner_key_id: apiKeyId,
+          user_id: userId,
+          ...(webhook_url ? { webhook_url } : {}),
           thread_id: resolvedThreadId,
         });
 

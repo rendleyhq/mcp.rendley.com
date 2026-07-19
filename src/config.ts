@@ -74,6 +74,8 @@ const EnvSchema = z.object({
   AUTH_BASE_URL: z.string().url().optional(),
   MCP_PUBLIC_URL: z.string().url().optional(),
   OPENAI_APPS_CHALLENGE_TOKEN: z.string().default(""),
+  // Master secret for outbound job webhooks. Empty disables webhook delivery.
+  WEBHOOK_SIGNING_SECRET: z.string().default(""),
   BROWSER_WORKER_URL: z.string().url().optional(),
   BROWSER_WORKER_TOKEN: z.string().default(""),
   BROWSER_MODE: z.preprocess(
@@ -137,6 +139,7 @@ export const config = {
       : `${mcpPublicUrl}/mcp`
     : "",
   openaiAppsChallengeToken: env.OPENAI_APPS_CHALLENGE_TOKEN.trim(),
+  webhookSigningSecret: env.WEBHOOK_SIGNING_SECRET.trim(),
   browserWorkerUrl: env.BROWSER_WORKER_URL
     ? trimTrailingSlash(env.BROWSER_WORKER_URL)
     : "",

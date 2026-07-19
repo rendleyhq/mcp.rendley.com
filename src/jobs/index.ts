@@ -1,10 +1,13 @@
 import type { CreateJobInput, Job, JobStore } from "@/types/jobs.types";
 import { JobStatus } from "@/types/jobs.types";
 import { createMemoryJobStore } from "@/jobs/memory-store";
+import { dispatchJobWebhook } from "@/webhooks/deliver";
 
 // In-memory only (single replica). Jobs don't survive a restart; shutdown
 // marks every still-running job failed so pollers get a terminal answer.
-const store: JobStore = createMemoryJobStore();
+const store: JobStore = createMemoryJobStore({
+  onTerminal: dispatchJobWebhook,
+});
 
 export function createJob(input: CreateJobInput): Promise<Job> {
   return store.create(input);
@@ -38,6 +41,6 @@ export async function failInterruptedJobs(): Promise<number> {
 }
 
 export function jobToResponse(job: Job): Record<string, unknown> {
-  const { owner_key_id, ...safe } = job;
+  const { owner_key_id, user_id, webhook_url, ...safe } = job;
   return safe;
 }

@@ -1,5 +1,6 @@
 import { randomUUID } from "crypto";
 import { config } from "@/config";
+import { log } from "@/logger";
 import type { CreateJobInput, Job, JobStore } from "@/types/jobs.types";
 import { JobStatus } from "@/types/jobs.types";
 
@@ -14,14 +15,49 @@ export const isTerminal = (s: JobStatus) =>
 // unbounded on a long-lived process.
 const SWEEP_INTERVAL_MS = 5 * 60 * 1000;
 
-export function createMemoryJobStore(): JobStore {
+export interface MemoryJobStoreOptions {
+  // Fired once per job, on the first write that takes it terminal.
+  onTerminal?: (job: Job) => void;
+}
+
+export function createMemoryJobStore(options: MemoryJobStoreOptions = {}): JobStore {
   const jobs = new Map<string, Job>();
+
+  // Only a non-terminal -> terminal crossing fires, so a double terminal write
+  // (cancel, then the runner's finally block) can't deliver twice.
+  const emitTerminal = (before: Job | undefined, after: Job): void => {
+    if (!options.onTerminal) return;
+    if (before && isTerminal(before.status)) return;
+    if (!isTerminal(after.status)) return;
+    try {
+      options.onTerminal(after);
+    } catch (err) {
+      log.error("job_terminal_listener_failed", { jobId: after.job_id, err });
+    }
+  };
+
+  // Shared by the lazy read path and the sweep: webhook consumers don't poll, so
+  // a runner that dies without a terminal write must still be reaped on a timer.
+  const failOrphan = (job: Job): Job => {
+    const failed: Job = {
+      ...job,
+      status: JobStatus.Failed,
+      error: "orphaned",
+      result: { reason: "orphaned" },
+      updated_at: Date.now(),
+    };
+    jobs.set(job.job_id, failed);
+    emitTerminal(job, failed);
+    return failed;
+  };
 
   const sweep = () => {
     const now = Date.now();
     for (const [id, job] of jobs) {
-      if (isTerminal(job.status) && now - job.updated_at > JOB_TTL_MS) {
-        jobs.delete(id);
+      if (isTerminal(job.status)) {
+        if (now - job.updated_at > JOB_TTL_MS) jobs.delete(id);
+      } else if (now - job.updated_at > ORPHAN_MAX_AGE_MS) {
+        failOrphan(job);
       }
     }
   };
@@ -35,9 +71,11 @@ export function createMemoryJobStore(): JobStore {
         kind: input.kind,
         project_id: input.project_id,
         owner_key_id: input.owner_key_id,
+        user_id: input.user_id,
         status: JobStatus.Pending,
         created_at: now,
         updated_at: now,
+        ...(input.webhook_url ? { webhook_url: input.webhook_url } : {}),
         ...(input.thread_id ? { thread_id: input.thread_id } : {}),
       };
       jobs.set(job.job_id, job);
@@ -45,7 +83,9 @@ export function createMemoryJobStore(): JobStore {
     },
 
     async insert(job: Job): Promise<void> {
+      const existing = jobs.get(job.job_id);
       jobs.set(job.job_id, job);
+      emitTerminal(existing, job);
     },
 
     async get(id: string): Promise<Job | null> {
@@ -62,15 +102,7 @@ export function createMemoryJobStore(): JobStore {
       }
 
       if (age > ORPHAN_MAX_AGE_MS) {
-        const failed: Job = {
-          ...job,
-          status: JobStatus.Failed,
-          error: "orphaned",
-          result: { reason: "orphaned" },
-          updated_at: Date.now(),
-        };
-        jobs.set(id, failed);
-        return failed;
+        return failOrphan(job);
       }
       return job;
     },
@@ -80,6 +112,7 @@ export function createMemoryJobStore(): JobStore {
       if (!existing) return null;
       const updated: Job = { ...existing, ...patch, updated_at: Date.now() };
       jobs.set(id, updated);
+      emitTerminal(existing, updated);
       return updated;
     },
 

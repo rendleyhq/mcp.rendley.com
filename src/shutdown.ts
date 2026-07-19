@@ -1,6 +1,7 @@
 // Shutdown order must hold: stop HTTP, then drain in-flight jobs.
 import { jobQueue } from "@/queue";
 import { failInterruptedJobs } from "@/jobs/index";
+import { drainJobWebhooks } from "@/webhooks/deliver";
 import { shutdownAnalytics } from "@/analytics";
 import { log } from "@/logger";
 
@@ -59,6 +60,15 @@ async function gracefulShutdown(
     if (failed > 0) log.warn("shutdown_failed_interrupted_jobs", { count: failed });
   } catch (err) {
     log.error("shutdown_fail_jobs_error", { err });
+  }
+
+  // After failInterruptedJobs, so the terminal writes it just made get a chance
+  // to deliver before the process goes away.
+  try {
+    const { drained, abandoned } = await drainJobWebhooks();
+    log.info("shutdown_webhooks_drained", { drained, abandoned });
+  } catch (err) {
+    log.error("shutdown_webhook_drain_error", { err });
   }
 
   await shutdownAnalytics();

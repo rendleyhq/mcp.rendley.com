@@ -7,7 +7,8 @@ import { registerJobAbort, unregisterJobAbort } from "@/jobs/cancellation";
 import { JobKind, JobStatus } from "@/types/jobs.types";
 import { log } from "@/logger";
 import { getQueueStats, runQueued, tryReserveTask, releaseTask } from "@/queue";
-import { validateExternalUrl, UrlGuardError } from "@/utils/url-guard";
+import { validateExternalUrl, validateWebhookUrl, UrlGuardError } from "@/utils/url-guard";
+import { config } from "@/config";
 import {
   acquireAllOrWait,
   resolveKeys,
@@ -55,6 +56,7 @@ const StartBodySchema = z.object({
     .regex(ID_RE, "end_user_id must match /^[A-Za-z0-9_-]{1,128}$/")
     .optional(),
   files: z.array(FileSchema).max(MAX_FILES_PER_REQUEST).optional().default([]),
+  webhook_url: z.string().max(2048).optional(),
 });
 
 function json(status: number, body: unknown): Response {
@@ -105,6 +107,23 @@ export async function handleStartAgentJob(
     );
   }
   const body = parsed.data;
+
+  if (body.webhook_url) {
+    if (!config.webhookSigningSecret) {
+      return badRequest(
+        "WEBHOOKS_DISABLED",
+        "webhook delivery is not configured on this server",
+      );
+    }
+    try {
+      validateWebhookUrl(body.webhook_url);
+    } catch (err) {
+      if (err instanceof UrlGuardError) {
+        return badRequest("BLOCKED_URL", `webhook_url rejected: ${err.message}`);
+      }
+      throw err;
+    }
+  }
 
   for (const f of body.files) {
     for (const u of [f.url, f.storage_url]) {
@@ -208,6 +227,8 @@ export async function handleStartAgentJob(
       kind: JobKind.Agent,
       project_id: projectId,
       owner_key_id: deps.apiKeyId,
+      user_id: deps.userId,
+      ...(body.webhook_url ? { webhook_url: body.webhook_url } : {}),
       thread_id: resolvedThreadId,
     });
 
