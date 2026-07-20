@@ -96,7 +96,7 @@ export function registerProjectTools(server: McpServer, apiClient: ApiClient) {
           }
         }
         if (failedWorkspaces > 0) {
-          log.warn("list_projects_partial", {
+          log.warn("some workspaces failed while listing projects", {
             failedWorkspaces,
             totalWorkspaces: workspaceIds.length,
           });

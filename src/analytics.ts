@@ -20,10 +20,10 @@ if (apiKey) {
       // the user's — disabling GeoIP avoids geo-locating the server.
       disableGeoip: true,
     });
-    log.info("analytics_enabled", { host });
+    log.debug("analytics enabled", { host });
   } catch (err) {
     client = null;
-    log.warn("analytics_init_failed", {
+    log.warn("failed to initialize analytics", {
       err: err instanceof Error ? err.message : String(err),
     });
   }
@@ -50,7 +50,7 @@ export function capture(
       properties: { ...sanitizeProps(props), surface: SOURCE_SURFACE },
     });
   } catch (err) {
-    log.warn("analytics_capture_failed", {
+    log.warn("failed to capture analytics event", {
       event,
       err: err instanceof Error ? err.message : String(err),
     });
@@ -62,7 +62,7 @@ export async function shutdownAnalytics(): Promise<void> {
   try {
     await client.shutdown();
   } catch (err) {
-    log.warn("analytics_shutdown_failed", {
+    log.warn("failed to shut down analytics", {
       err: err instanceof Error ? err.message : String(err),
     });
   }

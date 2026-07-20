@@ -1,6 +1,7 @@
 import pino from "pino";
 import pretty from "pino-pretty";
 import { logs, SeverityNumber, type AnyValue } from "@opentelemetry/api-logs";
+import { getRequestContext } from "@/request-context";
 
 const MAX_FIELD_CHARS = 1000;
 
@@ -79,7 +80,7 @@ function truncateDeep(value: unknown): unknown {
 }
 
 const usePretty = process.env.LOG_PRETTY === "true";
-const useOtel = process.env.OTEL_ENABLED === "true";
+const useOtel = process.env.LOGS_ENABLED === "true" && Boolean(process.env.POSTHOG_API_KEY);
 
 const OTEL_SEVERITY: Record<string, SeverityNumber> = {
   trace: SeverityNumber.TRACE,
@@ -92,7 +93,7 @@ const OTEL_SEVERITY: Record<string, SeverityNumber> = {
 
 // Direct pino -> OTEL bridge; @opentelemetry/instrumentation-pino doesn't hook bun's ESM imports.
 function createOtelLogStream(): { write(line: string): void } {
-  const otelLogger = logs.getLogger(process.env.OTEL_SERVICE_NAME ?? "rendley-mcp");
+  const otelLogger = logs.getLogger("mcp");
   return {
     write(line: string) {
       let record: Record<string, unknown>;
@@ -123,6 +124,18 @@ const options: pino.LoggerOptions = {
   level: (process.env.LOG_LEVEL ?? "info").toLowerCase(),
   messageKey: "event",
   timestamp: () => `,"ts":"${new Date().toISOString()}"`,
+  // Stamp request_id / user_id (from AsyncLocalStorage) onto every line so logs
+  // from anywhere in a request correlate and link to the person (user_id).
+  mixin() {
+    const ctx = getRequestContext();
+    if (!ctx) {
+      return {};
+    }
+    return {
+      request_id: ctx.request_id,
+      ...(ctx.user_id ? { user_id: ctx.user_id } : {}),
+    };
+  },
   formatters: {
     level(label) {
       return { level: label };

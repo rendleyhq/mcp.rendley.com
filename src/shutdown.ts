@@ -2,6 +2,7 @@
 import { jobQueue } from "@/queue";
 import { failInterruptedJobs } from "@/jobs/index";
 import { shutdownAnalytics } from "@/analytics";
+import { shutdownTelemetry } from "@/instrumentation";
 import { log } from "@/logger";
 
 interface ClosableServer {
@@ -23,7 +24,7 @@ export function installShutdownHandlers(deps: ShutdownDeps): void {
     gracefulShutdown(signal, deps).then(
       () => process.exit(0),
       (err) => {
-        log.error("shutdown_error", { err });
+        log.error("shutdown handler failed", { err });
         process.exit(1);
       },
     );
@@ -36,7 +37,7 @@ async function gracefulShutdown(
   signal: string,
   { server }: ShutdownDeps,
 ): Promise<void> {
-  log.info("shutdown_start", { signal });
+  log.info("shutdown started", { signal });
 
   await closeServer(server);
 
@@ -44,7 +45,7 @@ async function gracefulShutdown(
     jobQueue.onIdle(),
     new Promise<void>((resolve) => {
       const t = setTimeout(() => {
-        log.warn("queue_drain_timeout", { timeoutMs: QUEUE_DRAIN_TIMEOUT_MS });
+        log.warn("queue drain timed out", { timeoutMs: QUEUE_DRAIN_TIMEOUT_MS });
         resolve();
       }, QUEUE_DRAIN_TIMEOUT_MS);
       t.unref?.();
@@ -56,25 +57,28 @@ async function gracefulShutdown(
   // stuck "running" until the orphan window (or a 404 with the in-memory store).
   try {
     const failed = await failInterruptedJobs();
-    if (failed > 0) log.warn("shutdown_failed_interrupted_jobs", { count: failed });
+    if (failed > 0) log.warn("marked interrupted jobs failed during shutdown", { count: failed });
   } catch (err) {
-    log.error("shutdown_fail_jobs_error", { err });
+    log.error("failed to mark interrupted jobs during shutdown", { err });
   }
 
   await shutdownAnalytics();
 
-  log.info("shutdown_complete");
+  log.info("shutdown complete");
+
+  // Last: flush pending PostHog log batches (including the line above).
+  await shutdownTelemetry();
 }
 
 async function closeServer(server: ClosableServer): Promise<void> {
   try {
-    await withTimeout(server.stop(), SERVER_CLOSE_TIMEOUT_MS, "server_stop_timeout");
+    await withTimeout(server.stop(), SERVER_CLOSE_TIMEOUT_MS, "server stop timed out");
   } catch (err) {
     log.warn("server_stop_timeout", { timeoutMs: SERVER_CLOSE_TIMEOUT_MS, err });
     try {
       await server.stop(true);
     } catch (forceErr) {
-      log.warn("server_force_stop_failed", { err: forceErr });
+      log.warn("failed to force-stop server", { err: forceErr });
     }
   }
 }

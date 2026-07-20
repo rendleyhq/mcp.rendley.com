@@ -133,7 +133,7 @@ export async function handleStartAgentJob(
   // makes a request wait for a run slot (in the background below), not fail.
   if (!tryReserveTask()) {
     recordQueueFullRejected();
-    log.warn("pending_cap_reached_agent_rejected", getQueueStats());
+    log.warn("agent request rejected, pending job cap reached", getQueueStats());
     return new Response(
       JSON.stringify({
         error: {
@@ -211,7 +211,7 @@ export async function handleStartAgentJob(
       thread_id: resolvedThreadId,
     });
 
-    log.info("rest_agent_job_started", {
+    log.info("rest agent job started", {
       jobId: job.job_id,
       projectId,
       threadId: resolvedThreadId,
@@ -270,7 +270,7 @@ export async function handleStartAgentJob(
           }),
         );
       } catch (err) {
-        log.error("rest_agent_run_failed", { jobId: job.job_id, err });
+        log.error("rest agent run failed", { jobId: job.job_id, err });
         await updateJob(job.job_id, {
           status: JobStatus.Failed,
           error: err instanceof Error ? err.message : String(err),

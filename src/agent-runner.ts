@@ -26,15 +26,31 @@ interface RunInput {
   signal?: AbortSignal;
 }
 
-// Runs the browser-mediated agent edit and writes the terminal state to the
-// job store. Returns the final job record so synchronous callers (the hybrid
+// Runs the browser-mediated agent edit and writes the terminal state to the job
+// store, then emits ONE wide completion event (status + duration) covering every
+// exit path. Returns the final job record so synchronous callers (the hybrid
 // edit_video window) can use the result without re-reading the store.
 export async function runAgentJob(input: RunInput): Promise<Job | null> {
+  const startedAt = Date.now();
+  const job = await runAgentJobInner(input);
+  const result = job?.result as { reason?: string } | undefined;
+  log.info("agent job finished", {
+    jobId: input.jobId,
+    projectId: input.projectId,
+    threadId: input.threadId,
+    status: job?.status ?? "unknown",
+    reason: result?.reason,
+    duration_ms: Date.now() - startedAt,
+  });
+  return job;
+}
+
+async function runAgentJobInner(input: RunInput): Promise<Job | null> {
   const maxWaitMs = input.maxWaitMs ?? config.agentTimeoutMs;
   const logger = log.child({
     jobId: input.jobId,
     projectId: input.projectId,
-    component: "agentRunner",
+    component: "agent_runner",
   });
 
   const progressRing: string[] = [];
@@ -64,10 +80,10 @@ export async function runAgentJob(input: RunInput): Promise<Job | null> {
   };
 
   try {
-    logger.info("start", { attachments: input.attachments.length });
+    logger.info("agent run started", { attachments: input.attachments.length });
 
     if (input.signal?.aborted) {
-      logger.info("cancelled_before_start");
+      logger.info("agent run cancelled before start");
       return await markCancelled();
     }
 
@@ -159,11 +175,11 @@ export async function runAgentJob(input: RunInput): Promise<Job | null> {
     }
   } catch (err) {
     if (input.signal?.aborted) {
-      logger.info("cancelled");
+      logger.info("agent run cancelled");
       return await markCancelled();
     }
     if (err instanceof BrowserBusyError) {
-      logger.warn("browser_busy", { err });
+      logger.warn("browser worker at capacity", { err });
       return await updateJob(input.jobId, {
         status: JobStatus.Failed,
         error: "browser worker at capacity",
@@ -175,7 +191,7 @@ export async function runAgentJob(input: RunInput): Promise<Job | null> {
         },
       });
     }
-    logger.error("failed", { err });
+    logger.error("agent run failed", { err });
     return await updateJob(input.jobId, {
       status: JobStatus.Failed,
       error: err instanceof Error ? err.message : String(err),

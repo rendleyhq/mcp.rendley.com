@@ -26,7 +26,7 @@ function errorResponse(err: unknown): Response {
   if (ApiError.isApiError(err) && err.status >= 400 && err.status < 500) {
     return fail(err.status, err.code, err.message);
   }
-  log.error("stream_upload_failed", { err });
+  log.error("stream upload failed", { err });
   return fail(502, "UPLOAD_FAILED", formatError(err));
 }
 
@@ -103,7 +103,7 @@ async function finalizeProject(
     bytes: bytes.byteLength,
     fileHash,
   };
-  log.info("stream_upload_start", base);
+  log.debug("stream upload started", base);
 
   const created = await ctx.apiClient.createBatchUpload(ctx.projectId, [
     {
@@ -119,13 +119,13 @@ async function finalizeProject(
   const item = created.items[0];
   if (!item) {
     const reason = created.rejected?.[0]?.reason ?? "no upload slot was created";
-    log.error("stream_upload_rejected", { ...base, reason });
+    log.warn("stream upload rejected", { ...base, reason });
     return fail(502, "UPLOAD_REJECTED", reason);
   }
 
   const putRes = await putToStorage(item.presigned_url, bytes, ctx.mimeType, signal);
   if (!putRes.ok) {
-    log.error("stream_upload_storage_put_failed", {
+    log.error("failed to store stream upload", {
       ...base,
       status: putRes.status,
       storageError: putRes.body.slice(0, 1000),
@@ -140,17 +140,17 @@ async function finalizeProject(
   const completeRes = await ctx.apiClient.completeBatchUpload([item.upload_id]);
   const failure = completeRes.failed?.find((f) => f.upload_id === item.upload_id);
   if (failure) {
-    log.error("stream_upload_complete_failed", { ...base, uploadId: item.upload_id, error: failure.error });
+    log.error("failed to complete stream upload", { ...base, uploadId: item.upload_id, error: failure.error });
     return fail(502, "COMPLETE_FAILED", failure.error);
   }
 
   const lookup = await ctx.apiClient.lookupUploadByHash(ctx.projectId, fileHash);
   if (!lookup?.storage_url) {
-    log.error("stream_upload_url_missing", base);
+    log.error("stream upload storage url missing", base);
     return fail(502, "STORAGE_URL_MISSING", "Upload completed but no storage URL was found.");
   }
 
-  log.info("stream_upload_complete", { ...base, storageUrl: lookup.storage_url });
+  log.info("stream upload completed", { ...base, storageUrl: lookup.storage_url });
   return json(200, { data: { storage_url: lookup.storage_url, media_id: ctx.mediaId } });
 }
 
@@ -168,7 +168,7 @@ async function finalizeBrandkit(
 
   const putRes = await putToStorage(created.presigned_url, bytes, ctx.mimeType, signal);
   if (!putRes.ok) {
-    log.error("brandkit_upload_storage_put_failed", {
+    log.error("failed to store brandkit upload", {
       workspaceId: ctx.workspaceId,
       fileName: ctx.fileName,
       status: putRes.status,

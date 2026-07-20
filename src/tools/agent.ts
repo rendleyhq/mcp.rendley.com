@@ -360,7 +360,7 @@ export function registerAgentTools(server: McpServer, deps: AgentToolDeps) {
       // cap makes a request wait for a run slot (below), it doesn't turn it away.
       if (!tryReserveTask()) {
         recordQueueFullRejected();
-        logger.warn("pending_cap_reached_edit_video_rejected");
+        logger.warn("edit video rejected, pending job cap reached");
         return fail(
           "The video editor has a lot of edits queued right now. Please retry in a few seconds.",
         );
@@ -406,7 +406,7 @@ export function registerAgentTools(server: McpServer, deps: AgentToolDeps) {
           thread_id: resolvedThreadId,
         });
 
-        logger.info("edit_video_job_started", {
+        logger.info("edit video job started", {
           jobId: job.job_id,
           threadId: resolvedThreadId,
           files: remoteAttachments.length,
@@ -463,7 +463,7 @@ export function registerAgentTools(server: McpServer, deps: AgentToolDeps) {
               }),
             );
           } catch (err) {
-            logger.error("agent_job_run_failed", { jobId: job.job_id, err });
+            logger.error("agent job run failed", { jobId: job.job_id, err });
             await updateJob(job.job_id, {
               status: JobStatus.Failed,
               error: err instanceof Error ? err.message : String(err),
@@ -479,7 +479,7 @@ export function registerAgentTools(server: McpServer, deps: AgentToolDeps) {
         return formatInProgress(job);
       } catch (err) {
         releaseReserved();
-        logger.error("send_failed", { err });
+        logger.error("failed to start agent job", { err });
         return fail(`Agent message failed: ${formatError(err)}`);
       }
     },

@@ -56,7 +56,7 @@ export async function pollAgentCore(opts: PollOptions): Promise<PollOutcome> {
   const { page, projectId, release, maxWaitMs, autoApprove } = opts;
   const logger = (opts.logger ?? log).child({
     projectId,
-    component: "pollAgentCore",
+    component: "agent_poll",
   });
   const onProgress = opts.onProgress ?? (() => {});
 
@@ -89,17 +89,17 @@ export async function pollAgentCore(opts: PollOptions): Promise<PollOutcome> {
         save = { status: `error:${err instanceof Error ? err.message : String(err)}` };
       }
       if (save.status === "synced") break;
-      logger.warn("save_retry", { attempt, saveStatus: save.status, mode });
+      logger.debug("retrying project save", { attempt, saveStatus: save.status, mode });
     }
 
     if (save.status !== "synced") {
       await close();
-      logger.warn("save_not_confirmed", { saveStatus: save.status, mode });
+      logger.warn("project save not confirmed", { saveStatus: save.status, mode });
       return { kind: "save_failed", saveStatus: save.status, lastMessage };
     }
 
     await close();
-    logger.info("completed", {
+    logger.info("agent run completed", {
       commandExecutions: status.commandExecutions,
       mode,
       closed: true,
@@ -118,7 +118,7 @@ export async function pollAgentCore(opts: PollOptions): Promise<PollOutcome> {
     if (ticks % HEAP_SAMPLE_EVERY_TICKS === 0) {
       const heap = await sampleJsHeap(page);
       if (heap?.usedJSHeapSize && heap.usedJSHeapSize > heapBudgetBytes) {
-        logger.warn("heap_budget_exceeded", {
+        logger.warn("heap budget exceeded", {
           usedJSHeapSize: heap.usedJSHeapSize,
           budgetBytes: heapBudgetBytes,
           ticks,
@@ -146,7 +146,7 @@ export async function pollAgentCore(opts: PollOptions): Promise<PollOutcome> {
       const messages = await bridge.getMessages(page).catch(() => []);
       const lastMessage = bridge.lastAssistantContent(messages);
       await close();
-      logger.warn("agent_error", {
+      logger.warn("agent reported error", {
         error: status.lastError,
         commandExecutions: status.commandExecutions,
         ticks,
@@ -178,7 +178,7 @@ export async function pollAgentCore(opts: PollOptions): Promise<PollOutcome> {
         await bridge.resumeInterrupt(page, "approve");
         idleCount = 0;
         await onProgress(`Auto-approved ${status.interruptType ?? "interrupt"}`);
-        logger.debug("interrupt_auto_approved", {
+        logger.debug("interrupt auto-approved", {
           interruptType: status.interruptType,
         });
         continue;
@@ -186,7 +186,7 @@ export async function pollAgentCore(opts: PollOptions): Promise<PollOutcome> {
       const messages = await bridge.getMessages(page);
       const lastMessage = bridge.lastAssistantContent(messages);
       await close();
-      logger.info("interrupt_rejected_no_resume", {
+      logger.info("interrupt rejected, not resuming", {
         interruptType: status.interruptType,
       });
       return { kind: "interrupt", status, lastMessage };
@@ -202,7 +202,7 @@ export async function pollAgentCore(opts: PollOptions): Promise<PollOutcome> {
         const messages = await bridge.getMessages(page).catch(() => []);
         const lastMessage = bridge.lastAssistantContent(messages);
         await close();
-        logger.warn("agent_run_terminal", { runStatus: terminal, ticks });
+        logger.warn("agent run reached terminal status", { runStatus: terminal, ticks });
         return {
           kind: "error",
           status,
@@ -239,6 +239,6 @@ export async function pollAgentCore(opts: PollOptions): Promise<PollOutcome> {
   const messages = await bridge.getMessages(page);
   const lastMessage = bridge.lastAssistantContent(messages);
   await close();
-  logger.warn("timeout", { maxWaitMs, ticks });
+  logger.warn("agent run timed out", { maxWaitMs, ticks });
   return { kind: "timeout", lastMessage };
 }

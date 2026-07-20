@@ -8,7 +8,7 @@
 
 # Must match the `playwright` package version in package.json — the image ships
 # the matching browsers and the build reuses them (bump both together).
-FROM mcr.microsoft.com/playwright:v1.59.1-jammy AS base
+FROM mcr.microsoft.com/playwright:v1.61.1-jammy AS base
 
 # System libs for GPU/codec paths.
 RUN apt-get update \

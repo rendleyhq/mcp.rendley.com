@@ -1,7 +1,6 @@
 import { Hono } from "hono";
 import { cors } from "hono/cors";
 import { secureHeaders } from "hono/secure-headers";
-import { otel } from "@hono/otel";
 import type { Context } from "hono";
 import { McpServer } from "@modelcontextprotocol/sdk/server/mcp.js";
 import { WebStandardStreamableHTTPServerTransport } from "@modelcontextprotocol/sdk/server/webStandardStreamableHttp.js";
@@ -25,8 +24,47 @@ import { MAX_UPLOAD_BYTES } from "@/http/upload-tokens";
 import { log } from "@/logger";
 import { getQueueStats } from "@/queue";
 import { installShutdownHandlers } from "@/shutdown";
+import { runWithRequestContext } from "@/request-context";
 
 const app = new Hono<AppEnv>();
+
+// Request context runs outermost so every log during the request carries
+// request_id/user_id (see logger mixin). It also emits the http_request wide
+// event, but keeps by outcome rather than logging every request: failures
+// (4xx/5xx) and unusually slow requests always, the ordinary fast 2xx/3xx never
+// — their real work is already captured by tool_completed / agent_job_finished,
+// so a line per successful poll/list call would be pure noise. /health* is
+// skipped entirely. The finally guarantees the event even on throw.
+const HEALTH_PATHS = new Set(["/health", "/health/details"]);
+const SLOW_REQUEST_MS = 3000;
+app.use("*", async (c, next) => {
+  if (HEALTH_PATHS.has(c.req.path)) {
+    return next();
+  }
+  const requestId = crypto.randomUUID();
+  const start = performance.now();
+  return runWithRequestContext({ request_id: requestId }, async () => {
+    try {
+      await next();
+    } finally {
+      const status = c.res.status;
+      const duration_ms = Math.round(performance.now() - start);
+      const attrs = {
+        method: c.req.method,
+        path: c.req.routePath,
+        status,
+        duration_ms,
+      };
+      if (status >= 500) {
+        log.error("http request failed", attrs);
+      } else if (status >= 400) {
+        log.warn("http request client error", attrs);
+      } else if (duration_ms >= SLOW_REQUEST_MS) {
+        log.info("slow http request", attrs);
+      }
+    }
+  });
+});
 
 // Unwinds last to override secureHeaders' CORP so /.well-known stays cross-origin.
 app.use("/.well-known/*", async (c, next) => {
@@ -34,7 +72,6 @@ app.use("/.well-known/*", async (c, next) => {
   c.header("Cross-Origin-Resource-Policy", "cross-origin");
 });
 
-app.use("*", otel());
 
 app.use(
   "*",
@@ -179,6 +216,43 @@ const FREE_PLAN_PAYWALL_MESSAGE =
 // handler for an upgrade prompt. Used for free plans: the MCP is a paid feature,
 // but a soft paywall lets the assistant nudge the user rather than failing to
 // connect. Wrap before registering so all tools are covered in one place.
+// Wraps every tool handler to emit one event per tool call — tool name, outcome
+// (tools return { isError } rather than throwing on business failures, so those
+// are otherwise invisible: the MCP HTTP response is a 200), and duration. Runs
+// inside the request context, so user_id/request_id are stamped automatically.
+function installToolLogging(server: McpServer): void {
+  const register = server.registerTool.bind(server) as (
+    name: string,
+    config: unknown,
+    cb: (...args: unknown[]) => unknown,
+  ) => unknown;
+  (server as unknown as { registerTool: typeof register }).registerTool = (
+    name,
+    config,
+    cb,
+  ) =>
+    register(name, config, async (...args: unknown[]) => {
+      const start = performance.now();
+      try {
+        const result = (await cb(...args)) as { isError?: boolean };
+        const duration_ms = Math.round(performance.now() - start);
+        if (result?.isError) {
+          log.warn("tool failed", { tool: name, duration_ms });
+        } else {
+          log.info("tool completed", { tool: name, duration_ms });
+        }
+        return result;
+      } catch (err) {
+        log.error("tool threw unhandled error", {
+          tool: name,
+          duration_ms: Math.round(performance.now() - start),
+          err,
+        });
+        throw err;
+      }
+    });
+}
+
 function installFreePlanPaywall(server: McpServer): void {
   const register = server.registerTool.bind(server) as (
     name: string,
@@ -213,6 +287,9 @@ async function handleMCPRequest(c: Context<AppEnv>): Promise<Response> {
     installFreePlanPaywall(server);
   }
 
+  // Applied last so it wraps the real (or paywall) handler — one event per call.
+  installToolLogging(server);
+
   registerProjectTools(server, apiClient);
   registerAccountTools(server, apiClient);
   registerAgentTools(server, {
@@ -242,7 +319,7 @@ const server = Bun.serve({
 
 installShutdownHandlers({ server });
 
-log.info("mcp_server_started", {
+log.info("mcp server started", {
   port: config.port,
   queueConcurrency: config.queueConcurrency,
   browserMode: config.browserMode,

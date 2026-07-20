@@ -62,7 +62,7 @@ export async function handleUploadBrandAsset(
     if (err instanceof UrlGuardError) {
       return json(400, { error: { code: err.code.toUpperCase(), message: err.message } });
     }
-    log.error("rest_brand_asset_upload_failed", { err });
+    log.error("failed to upload brand asset", { err });
     return json(502, {
       error: {
         code: "UPLOAD_FAILED",

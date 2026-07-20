@@ -1,52 +1,44 @@
+// PostHog Logs pipeline (OTLP/HTTP), preloaded via `bun --preload`. Logs only —
+// PostHog ingests no traces or metrics, so the Grafana-era NodeSDK, trace and
+// metric exporters are gone. logger.ts bridges every pino line into the global
+// logger provider registered here.
 import logsAPI from "@opentelemetry/api-logs";
-import { NodeSDK } from "@opentelemetry/sdk-node";
-import { OTLPTraceExporter } from "@opentelemetry/exporter-trace-otlp-http";
-import { OTLPMetricExporter } from "@opentelemetry/exporter-metrics-otlp-http";
 import { OTLPLogExporter } from "@opentelemetry/exporter-logs-otlp-http";
-import { getNodeAutoInstrumentations } from "@opentelemetry/auto-instrumentations-node";
-import { PeriodicExportingMetricReader } from "@opentelemetry/sdk-metrics";
-import {
-  detectResources,
-  envDetector,
-  hostDetector,
-  osDetector,
-  processDetector,
-  serviceInstanceIdDetector,
-} from "@opentelemetry/resources";
-import {
-  LoggerProvider,
-  SimpleLogRecordProcessor,
-} from "@opentelemetry/sdk-logs";
+import { resourceFromAttributes } from "@opentelemetry/resources";
+import { BatchLogRecordProcessor, LoggerProvider } from "@opentelemetry/sdk-logs";
 
-if (process.env.OTEL_ENABLED === "true") {
-  // envDetector reads OTEL_SERVICE_NAME / OTEL_RESOURCE_ATTRIBUTES; without it the
-  // resource carries no service.name and everything shows up as "unknown_service".
-  const resource = detectResources({
-    detectors: [
-      envDetector,
-      hostDetector,
-      osDetector,
-      processDetector,
-      serviceInstanceIdDetector,
+const POSTHOG_LOGS_URL = "https://us.i.posthog.com/i/v1/logs";
+
+let loggerProvider: LoggerProvider | null = null;
+
+if (process.env.LOGS_ENABLED === "true" && process.env.POSTHOG_API_KEY) {
+  loggerProvider = new LoggerProvider({
+    resource: resourceFromAttributes({
+      "service.name": "mcp",
+      "deployment.environment.name": process.env.NODE_ENV ?? "production",
+      // SERVICE_VERSION (git sha) injected at deploy so a failure spike ties to a
+      // release; falls back to "dev" locally.
+      "service.version": process.env.SERVICE_VERSION ?? "dev",
+    }),
+    processors: [
+      new BatchLogRecordProcessor({
+        exporter: new OTLPLogExporter({
+          url: POSTHOG_LOGS_URL,
+          headers: { Authorization: `Bearer ${process.env.POSTHOG_API_KEY}` },
+        }),
+      }),
     ],
   });
 
-  const loggerProvider = new LoggerProvider({
-    resource,
-    processors: [new SimpleLogRecordProcessor(new OTLPLogExporter())],
-  });
-
   logsAPI.logs.setGlobalLoggerProvider(loggerProvider);
+}
 
-  const sdk = new NodeSDK({
-    resource,
-    traceExporter: new OTLPTraceExporter(),
-    metricReader: new PeriodicExportingMetricReader({
-      exporter: new OTLPMetricExporter(),
-      exportIntervalMillis: 60000,
-    }),
-    instrumentations: [getNodeAutoInstrumentations()],
-  });
-
-  sdk.start();
+// Flush pending log batches; called from the graceful-shutdown path. Never throws.
+export async function shutdownTelemetry(): Promise<void> {
+  if (!loggerProvider) return;
+  try {
+    await loggerProvider.shutdown();
+  } catch {
+    // Telemetry teardown must never fail a shutdown.
+  }
 }

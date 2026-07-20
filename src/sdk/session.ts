@@ -43,7 +43,7 @@ async function launchLocalBrowser(): Promise<Browser> {
       : await chromium.launch(common);
   } catch (err) {
     if (config.useChromeChannel) {
-      log.warn("chrome_channel_unavailable_falling_back", { err });
+      log.debug("chrome channel unavailable, falling back", { err });
       return chromium.launch(common);
     }
     throw err;
@@ -257,20 +257,23 @@ export async function acquireEditorPage(
 // 4xx/5xx API responses to our logs. Debug-only (see KEEP_BROWSER_OPEN) — it
 // runs for the whole session, so it's too chatty for normal operation.
 function attachDebugStream(page: Page, projectId: string): void {
-  const logger = log.child({ projectId, component: "editorDebugStream" });
+  const logger = log.child({ projectId, component: "editor_debug_stream" });
 
   page.on("console", (message) => {
     const type = message.type();
     if (type !== "error" && type !== "warning") return;
-    logger.warn("editor_console", { level: type, text: message.text() });
+    // Editor console is high-volume; only surface actual errors, and at debug.
+    if (type === "error") {
+      logger.debug("editor console error", { level: type, text: message.text() });
+    }
   });
 
   page.on("pageerror", (error) => {
-    logger.error("editor_page_error", { message: error.message });
+    logger.warn("editor page error", { message: error.message });
   });
 
   page.on("requestfailed", (request) => {
-    logger.warn("editor_request_failed", {
+    logger.warn("editor request failed", {
       url: scrubUrls(request.url()),
       error: request.failure()?.errorText,
     });
@@ -283,7 +286,7 @@ function attachDebugStream(page: Page, projectId: string): void {
     const url = response.url();
     const isApi = url.includes("/v1/") || url.includes("/api/");
     const body = isApi ? await response.text().catch(() => undefined) : undefined;
-    logger.warn("editor_response_error", {
+    logger.warn("editor response error", {
       status,
       url: scrubUrls(url),
       ...(body ? { body: body.slice(0, 500) } : {}),
@@ -295,7 +298,7 @@ export async function releasePage(page: Page): Promise<void> {
   // Debug escape hatch: keep the browser open so it can be inspected by hand.
   // Leaks a browser per run, so it's env-gated and local-only.
   if (config.keepBrowserOpen) {
-    log.warn("keep_browser_open", {
+    log.warn("keeping browser open for inspection", {
       url: scrubUrls(page.url()),
       hint: "KEEP_BROWSER_OPEN is set — browser left open for inspection; restart the process to reclaim it",
     });
