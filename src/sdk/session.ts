@@ -8,7 +8,7 @@ import {
   type Page,
 } from "playwright";
 import { config } from "@/config";
-import { log, scrubUrls } from "@/logger";
+import { log, scrubUrls, type Logger } from "@/logger";
 import { paceLaunch } from "@/sdk/worker-client";
 
 function getBrowserArgs(): string[] {
@@ -47,8 +47,8 @@ const VIEWPORT = { width: 960, height: 540 };
 // instead of being abandoned to leak and starve every later launch.
 const sessions = new WeakMap<Page, { userDataDir: string }>();
 
-const DEFAULT_ACQUIRE_TIMEOUT_MS = 4 * 60 * 1000;
 const GRACEFUL_CLOSE_TIMEOUT_MS = 10 * 1000;
+const ACQUIRE_PROGRESS_INTERVAL_MS = 15 * 1000;
 
 function killByUserDataDir(userDataDir: string): void {
   // -f matches the full command line; the mkdtemp dir is unique per session.
@@ -107,6 +107,7 @@ interface AuthDiagnostics {
   currentUrl?: string;
   pageErrors: string[];
   consoleErrors: string[];
+  loadState?: { readyState: string; resources: number };
 }
 
 interface AuthDiagnosticsHandle {
@@ -114,7 +115,7 @@ interface AuthDiagnosticsHandle {
   dispose: () => void;
 }
 
-function createAuthDiagnostics(page: Page): AuthDiagnosticsHandle {
+function createAuthDiagnostics(page: Page, logger: Logger): AuthDiagnosticsHandle {
   const state: AuthDiagnostics = {
     verifyRequestSeen: false,
     getSessionRequestSeen: false,
@@ -125,6 +126,9 @@ function createAuthDiagnostics(page: Page): AuthDiagnosticsHandle {
 
   const handleResponse = async (response: { url(): string; ok(): boolean; status(): number; text(): Promise<string> }) => {
     const url = response.url();
+    if (response.status() >= 400) {
+      logger.debug("acquire_http_error", { status: response.status(), url: scrubUrls(url) });
+    }
 
     if (url.includes("/v1/auth/one-time-token/verify")) {
       state.verifyRequestSeen = true;
@@ -148,6 +152,7 @@ function createAuthDiagnostics(page: Page): AuthDiagnosticsHandle {
   const handleRequestFailed = (request: { url(): string; failure(): { errorText?: string } | null }) => {
     const url = request.url();
     const failure = request.failure();
+    logger.debug("acquire_request_failed", { url: scrubUrls(url), error: failure?.errorText });
 
     if (url.includes("/v1/auth/one-time-token/verify")) {
       state.verifyRequestSeen = true;
@@ -161,11 +166,13 @@ function createAuthDiagnostics(page: Page): AuthDiagnosticsHandle {
   };
 
   const handlePageError = (error: Error) => {
+    logger.debug("acquire_page_error", { message: error.message });
     if (state.pageErrors.length < 5) state.pageErrors.push(error.message);
   };
 
   const handleConsole = (message: { type(): string; text(): string }) => {
     if (message.type() !== "error") return;
+    logger.debug("acquire_console_error", { text: message.text() });
     if (state.consoleErrors.length < 5) state.consoleErrors.push(message.text());
   };
 
@@ -195,6 +202,9 @@ function diagnosticsDetail(diagnostics: AuthDiagnostics): string {
   const parts: string[] = [];
   // currentUrl carries the session token; scrubUrls must redact it before logging.
   if (diagnostics.currentUrl) parts.push(`url=${scrubUrls(diagnostics.currentUrl)}`);
+  if (diagnostics.loadState) {
+    parts.push(`readyState=${diagnostics.loadState.readyState} resourcesLoaded=${diagnostics.loadState.resources}`);
+  }
   if (diagnostics.pageErrors.length > 0) parts.push(`pageErrors=${diagnostics.pageErrors.join(" | ")}`);
   if (diagnostics.consoleErrors.length > 0) parts.push(`consoleErrors=${diagnostics.consoleErrors.join(" | ")}`);
   return parts.length > 0 ? ` (${parts.join("; ")})` : "";
@@ -241,7 +251,11 @@ function explainAuthFailure(projectId: string, diagnostics: AuthDiagnostics): Er
     );
   }
 
-  return new Error(`Editor failed to become ready for project ${projectId}` + diagnosticsDetail(diagnostics));
+  return new Error(
+    `Editor failed to become ready for project ${projectId} within ${config.editorReadyTimeoutMs}ms` +
+      ` (raise EDITOR_READY_TIMEOUT_MS if the editor is just slow to load)` +
+      diagnosticsDetail(diagnostics),
+  );
 }
 
 export async function acquireEditorPage(
@@ -259,7 +273,7 @@ export async function acquireEditorPage(
   try {
     return await withTimeout(
       acquire,
-      opts.timeoutMs ?? DEFAULT_ACQUIRE_TIMEOUT_MS,
+      opts.timeoutMs ?? config.acquireTimeoutMs,
       "Opening the headless editor timed out. Retry the operation.",
     );
   } catch (err) {
@@ -300,7 +314,7 @@ async function doAcquire(
     throw err;
   }
 
-  const authDiagnostics = createAuthDiagnostics(page);
+  const authDiagnostics = createAuthDiagnostics(page, logger);
   try {
     await page.goto(headlessUrl, { waitUntil: "commit", timeout: 60000 });
     stage("navigation_committed");
@@ -309,6 +323,22 @@ async function doAcquire(
     await releasePage(page);
     throw err;
   }
+
+  const snapshotLoadState = () =>
+    page
+      .evaluate(() => ({
+        readyState: document.readyState,
+        resources: performance.getEntriesByType("resource").length,
+      }))
+      .catch(() => undefined);
+
+  // Heartbeat while the editor boots, so a slow load (big bundle over a slow
+  // link) is visible in the logs instead of minutes of silence.
+  const progressTimer = setInterval(() => {
+    void snapshotLoadState().then((state) => {
+      if (state) logger.info("acquire_waiting", { ...state, ms: Date.now() - startedAt });
+    });
+  }, ACQUIRE_PROGRESS_INTERVAL_MS);
 
   try {
     await page.waitForFunction(
@@ -321,12 +351,15 @@ async function doAcquire(
         );
       },
       projectId,
-      { timeout: 120000 },
+      { timeout: config.editorReadyTimeoutMs },
     );
   } catch {
+    authDiagnostics.state.loadState = await snapshotLoadState();
     authDiagnostics.dispose();
     await releasePage(page);
     throw explainAuthFailure(projectId, authDiagnostics.state);
+  } finally {
+    clearInterval(progressTimer);
   }
 
   if (page.url().includes("/login")) {

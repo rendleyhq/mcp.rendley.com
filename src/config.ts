@@ -63,6 +63,11 @@ const defaults = {
   chromiumJsHeapMb: 512,
   headless: true,
   useChromeChannel: true,
+  // Total budget for opening a headless editor page (launch + navigate + boot),
+  // and the slice of it spent waiting for the editor app to signal readiness.
+  // Raise both on slow links (e.g. a dev app served through a tunnel).
+  acquireTimeoutMs: 4 * 60 * 1000,
+  editorReadyTimeoutMs: 2 * 60 * 1000,
 } as const;
 
 const csvSchema = z
@@ -102,6 +107,8 @@ const EnvSchema = z.object({
   BROWSER_RECYCLE_AFTER: intSchema(defaults.browserRecycleAfter),
   AGENT_TIMEOUT_MS: intSchema(defaults.agentTimeoutMs),
   MOTION_OP_TIMEOUT_MS: intSchema(defaults.motionOpTimeoutMs),
+  ACQUIRE_TIMEOUT_MS: intSchema(defaults.acquireTimeoutMs),
+  EDITOR_READY_TIMEOUT_MS: intSchema(defaults.editorReadyTimeoutMs),
   MOTION_START_WAIT_MS: intSchema(defaults.motionStartWaitMs),
   JOB_POLL_WAIT_MS: intSchema(defaults.jobPollWaitMs),
   // Abort a worker run if no stream event (progress, result, or ping heartbeat)
@@ -138,6 +145,8 @@ export const config = {
   browserRecycleAfter: env.BROWSER_RECYCLE_AFTER,
   agentTimeoutMs: env.AGENT_TIMEOUT_MS,
   motionOpTimeoutMs: env.MOTION_OP_TIMEOUT_MS,
+  acquireTimeoutMs: env.ACQUIRE_TIMEOUT_MS,
+  editorReadyTimeoutMs: env.EDITOR_READY_TIMEOUT_MS,
   motionStartWaitMs: env.MOTION_START_WAIT_MS,
   jobPollWaitMs: env.JOB_POLL_WAIT_MS,
   workerStallTimeoutMs: env.WORKER_STALL_TIMEOUT_MS,

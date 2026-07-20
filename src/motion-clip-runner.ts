@@ -28,7 +28,6 @@ export interface MotionOpSpec {
 // thread that never returns from page.evaluate, a browser.close() that never
 // resolves) would otherwise hold the per-project lock forever — starving every
 // later job on the project until the store marks them "orphaned".
-const ACQUIRE_TIMEOUT_MS = 4 * 60 * 1000;
 const SAVE_TIMEOUT_MS = 90 * 1000;
 const RELEASE_TIMEOUT_MS = 15 * 1000;
 
@@ -85,7 +84,7 @@ async function runLocalMotionSession(
   const logger = log.child({ projectId: input.projectId, component: "motionClipRunner" });
 
   const page = await acquireEditorPage(headlessUrl, input.projectId, {
-    timeoutMs: ACQUIRE_TIMEOUT_MS,
+    timeoutMs: config.acquireTimeoutMs,
   });
 
   try {
